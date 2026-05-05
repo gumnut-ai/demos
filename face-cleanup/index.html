@@ -1,0 +1,1469 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Face cleanup</title>
+<style>
+  :root {
+    --bg: #0f1115;
+    --panel: #181b22;
+    --panel-2: #1f232c;
+    --border: #2a2f39;
+    --text: #e6e8ee;
+    --muted: #9aa3b2;
+    --accent: #5b8def;
+    --warn: #e8b04b;
+    --bad: #e85b6b;
+    --good: #5fc28b;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; background: var(--bg); color: var(--text);
+    font: 14px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+  a { color: var(--accent); }
+  button {
+    background: var(--panel-2); color: var(--text); border: 1px solid var(--border);
+    border-radius: 6px; padding: 6px 10px; cursor: pointer; font: inherit;
+  }
+  button:hover { border-color: var(--accent); }
+  button:disabled { opacity: 0.4; cursor: not-allowed; }
+  /* Hide focus ring on mouse-click, keep it for keyboard navigation. */
+  button:focus { outline: none; }
+  button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  /* Brief confirmation pulse — applied to whichever button (candidate or
+     action) the user just triggered, replacing the bottom-of-screen
+     toast for routine actions. */
+  @keyframes flash-confirm {
+    0%   { box-shadow: 0 0 0 3px var(--good); }
+    100% { box-shadow: 0 0 0 0 transparent; }
+  }
+  .flash { animation: flash-confirm 600ms ease-out; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button.danger  { background: var(--bad); border-color: var(--bad); color: #fff; }
+  input[type="text"], input[type="password"], input[type="number"] {
+    background: var(--panel-2); color: var(--text); border: 1px solid var(--border);
+    border-radius: 6px; padding: 6px 8px; font: inherit; width: 100%;
+  }
+  header {
+    position: sticky; top: 0; z-index: 5;
+    background: var(--panel); border-bottom: 1px solid var(--border);
+    padding: 10px 16px; display: flex; gap: 16px; align-items: center; flex-wrap: wrap;
+  }
+  header h1 { margin: 0; font-size: 16px; font-weight: 600; }
+  header .subject { color: var(--muted); }
+  header .change-subject { margin-left: 4px; font-size: 12px; }
+  header .filter-tabs { display: flex; gap: 6px; margin-left: auto; flex-wrap: wrap; }
+  header .filter-tabs button.active { background: var(--accent); border-color: var(--accent); color: #fff; }
+  main { max-width: 1100px; margin: 0 auto; padding: 16px; }
+
+  .config-panel {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
+    padding: 16px; margin-bottom: 16px;
+  }
+  .config-panel .row { display: flex; gap: 8px; align-items: center; margin-bottom: 8px; }
+  .config-panel .row label { width: 120px; color: var(--muted); }
+  .config-panel .row input,
+  .config-panel .row select { flex: 1; }
+  .config-panel h2 { margin: 0 0 12px; font-size: 14px; font-weight: 600; }
+
+  /* Person picker — scrollable list of named persons in the chosen
+     library, sorted by face_count desc, with an inline substring filter. */
+  .person-list {
+    max-height: 320px; overflow-y: auto;
+    border: 1px solid var(--border); border-radius: 6px;
+    background: var(--panel-2);
+  }
+  .person-row {
+    display: flex; gap: 10px; align-items: center;
+    padding: 8px 10px; cursor: pointer;
+    border-bottom: 1px solid var(--border);
+  }
+  .person-row:last-child { border-bottom: none; }
+  .person-row:hover { background: var(--panel); }
+  .person-row .name { font-weight: 600; flex: 1; min-width: 0;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .person-row .meta { color: var(--muted); font-size: 12px; }
+  .person-list-empty { padding: 12px; color: var(--muted); font-size: 13px; }
+
+  .progress {
+    display: flex; gap: 16px; align-items: center; color: var(--muted);
+    margin-bottom: 12px; flex-wrap: wrap;
+  }
+  .progress strong { color: var(--text); }
+
+  .card {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+    padding: 16px; margin-bottom: 12px;
+  }
+  /* Stacked card sections: meta · thumbnails · nearby · (actions outside). */
+  .thumb-row {
+    display: flex; gap: 12px; align-items: flex-start; flex-wrap: wrap;
+    margin: 12px 0 4px;
+  }
+  .face-img-wrap {
+    width: 220px; height: 220px; aspect-ratio: 1; flex-shrink: 0;
+    background: #000; border-radius: 8px; overflow: hidden;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .face-img-wrap img { width: 100%; height: 100%; object-fit: cover; }
+  .face-img-wrap.empty { color: var(--muted); font-size: 12px; }
+  /* Parent-asset thumbnail. Sized by natural aspect at height 220 so the
+     bbox overlay (positioned in %) lines up with the rendered image.
+     Very wide assets cap at max-width: 600px (rare; height shrinks if hit). */
+  .asset-img-wrap {
+    position: relative; height: 220px; flex-shrink: 0;
+    background: #000; border-radius: 8px; overflow: hidden;
+  }
+  .asset-img-wrap img { display: block; height: 100%; width: auto; max-width: 600px; }
+  .asset-img-wrap.empty {
+    width: 220px; height: 220px;
+    display: flex; align-items: center; justify-content: center;
+    color: var(--muted); font-size: 12px;
+  }
+  /* Highlights which face on the parent asset is currently under
+     review. The huge box-shadow dims everything outside the rectangle. */
+  .asset-bbox-overlay {
+    position: absolute;
+    border: 2px solid var(--warn);
+    box-shadow: 0 0 0 9999px rgba(0, 0, 0, 0.5);
+    pointer-events: none;
+  }
+  .asset-img-wrap.clickable { cursor: zoom-in; }
+  .asset-img-wrap.clickable:hover { outline: 2px solid var(--accent); }
+
+  /* Lightbox: click the asset thumb to see a larger version (preview
+     variant) with the same bbox highlight. Bbox uses % so it scales
+     automatically. */
+  .lightbox {
+    position: fixed; inset: 0; z-index: 200;
+    background: rgba(0, 0, 0, 0.85);
+    display: flex; align-items: center; justify-content: center;
+    cursor: zoom-out; padding: 24px;
+  }
+  .lightbox-frame {
+    position: relative; max-width: 100%; max-height: 100%;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .lightbox-frame img {
+    display: block; max-width: 100%; max-height: calc(100vh - 48px);
+    width: auto; height: auto; border-radius: 4px;
+  }
+  .lightbox-close {
+    position: fixed; top: 12px; right: 16px; z-index: 201;
+    background: rgba(0,0,0,0.6); color: var(--text);
+    border: 1px solid var(--border); border-radius: 6px;
+    padding: 6px 10px; cursor: pointer; font: inherit;
+  }
+  .lightbox-close:hover { border-color: var(--accent); }
+  .face-meta { color: var(--muted); font-size: 13px; }
+  .candidates-section { margin-top: 16px; }
+  .candidates-header {
+    font-size: 11px; font-weight: 600; text-transform: uppercase;
+    letter-spacing: 0.08em; color: var(--muted);
+    margin: 0 0 8px;
+  }
+  .face-meta .badge { display: inline-block; padding: 2px 6px; border-radius: 4px; margin-right: 6px; font-size: 11px; font-weight: 600; }
+  .badge.bad  { background: rgba(232, 91, 107, 0.18); color: var(--bad); }
+  .badge.warn { background: rgba(232, 176, 75, 0.18); color: var(--warn); }
+  .badge.good { background: rgba(95, 194, 139, 0.18); color: var(--good); }
+
+  .candidates { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 8px; }
+  .candidate {
+    background: var(--panel-2); border: 1px solid var(--border); border-radius: 8px;
+    padding: 8px; text-align: left; cursor: pointer; display: flex; gap: 8px; align-items: center;
+    color: var(--text);
+  }
+  .candidate:hover:not(:disabled) { border-color: var(--accent); }
+  .candidate.in-gate { border-color: rgba(95, 194, 139, 0.4); }
+  .candidate.out-gate { opacity: 0.7; }
+  .candidate-thumb {
+    width: 40px; height: 40px; border-radius: 50%; background: #000;
+    flex-shrink: 0; overflow: hidden; display: flex; align-items: center; justify-content: center;
+    color: var(--muted); font-size: 14px;
+  }
+  .candidate-thumb img { width: 100%; height: 100%; object-fit: cover; }
+  .candidate-meta { flex: 1; min-width: 0; }
+  .candidate-name { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .candidate-dist { color: var(--muted); font-size: 12px; }
+  .candidate kbd { font-size: 10px; padding: 1px 4px; border-radius: 3px; background: var(--bg); border: 1px solid var(--border); }
+
+  .actions { display: flex; gap: 6px; margin-top: 12px; flex-wrap: wrap; }
+  .toast {
+    position: fixed; bottom: 16px; left: 50%; transform: translateX(-50%);
+    background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
+    padding: 10px 16px; color: var(--text); z-index: 100;
+    box-shadow: 0 8px 24px rgba(0,0,0,0.4);
+  }
+  .toast.error { border-color: var(--bad); }
+  .toast.success { border-color: var(--good); }
+  .hint { color: var(--muted); font-size: 12px; margin-top: 6px; }
+  details summary { cursor: pointer; color: var(--muted); }
+  details[open] summary { margin-bottom: 8px; }
+
+  @media (max-width: 700px) {
+    .asset-img-wrap img { max-width: 100%; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>Face cleanup</h1>
+  <span class="subject" id="subject-label">Loading…</span>
+  <a href="#" class="change-subject" id="change-subject" hidden>Pick another person ↗</a>
+  <div class="filter-tabs" id="filter-tabs"></div>
+</header>
+
+<main>
+  <!-- Stage A — credentials. Shown on first load and any time the saved
+       key has been cleared. -->
+  <div class="config-panel" id="creds-panel" hidden>
+    <h2>Connect</h2>
+    <div class="row">
+      <label for="api-base">API base</label>
+      <input type="text" id="api-base" placeholder="https://api.gumnut.ai" />
+    </div>
+    <div class="row">
+      <label for="api-key">API key</label>
+      <input type="password" id="api-key" placeholder="gnt_…" />
+    </div>
+    <div class="row">
+      <label></label>
+      <button class="primary" id="save-creds">Continue</button>
+      <span class="hint" id="creds-hint"></span>
+    </div>
+    <details>
+      <summary>Keyboard shortcuts</summary>
+      <p class="hint">
+        <kbd>1</kbd>–<kbd>5</kbd> assign to candidate · <kbd>A</kbd> accept (confirm correct)
+        · <kbd>D</kbd> detach (set person to null) · <kbd>S</kbd> skip (revisit later)
+        · <kbd>←</kbd>/<kbd>→</kbd> navigate · <kbd>Z</kbd> undo last action
+      </p>
+    </details>
+  </div>
+
+  <!-- Stage B — library picker. Auto-skipped when the user has exactly one. -->
+  <div class="config-panel" id="library-panel" hidden>
+    <h2>Pick a library</h2>
+    <div class="row">
+      <label for="library-select">Library</label>
+      <select id="library-select"></select>
+    </div>
+    <div class="row">
+      <label></label>
+      <button class="primary" id="library-continue">Continue</button>
+      <span class="hint" id="library-hint"></span>
+    </div>
+  </div>
+
+  <!-- Stage C — person picker. Listbox sorted by face_count desc with an
+       inline filter; substring-matched locally so typing is instant. -->
+  <div class="config-panel" id="person-panel" hidden>
+    <h2>Pick a person to clean up</h2>
+    <div class="row">
+      <label for="person-filter">Filter</label>
+      <input type="text" id="person-filter" placeholder="type to filter…" autocomplete="off" />
+    </div>
+    <div class="person-list" id="person-list"></div>
+    <p class="hint">
+      <span id="person-hint"></span>
+      <a href="#" id="switch-library" hidden>Switch library</a>
+    </p>
+  </div>
+
+  <div id="content" hidden>
+    <div class="progress" id="progress"></div>
+    <div id="face-card-host"></div>
+    <div class="actions">
+      <button id="prev-btn">← Prev</button>
+      <button id="accept-btn" class="primary" title="Confirm this is correctly assigned, don't show again">Accept (A)</button>
+      <button id="skip-btn" title="Not sure — leave as-is, come back later">Skip (S)</button>
+      <button id="detach-btn" class="danger">Detach (D)</button>
+      <button id="next-btn">Next →</button>
+      <button id="undo-btn" disabled>Undo (Z)</button>
+    </div>
+  </div>
+</main>
+
+<div id="toast-host"></div>
+
+<script type="module">
+'use strict';
+
+// ---------- clustering thresholds ----------
+// Mirror of the production face-clustering constants Gumnut applies when
+// it assigns a face to a Person. Used here only to derive the per-face
+// flags (closer_to_other / sibling_ambig / within_distance_gate) and the
+// runtime badges. If these drift from production the dashboard still
+// works — the API call results are unchanged — but the suggestion tabs
+// will skew. See README.md ("Tuning") for current values.
+const DISTANCE_GATE     = 0.35;  // production face-assignment distance gate
+const COHESION_GATE     = 0.65;  // assignment pairwise-p90 cap
+const SIBLING_MARGIN    = 0.05;  // sibling-ambiguous margin
+const CANDIDATE_WINDOW  = 0.6;   // candidate distance window
+const OUTLIER_DISTANCE  = 0.45;  // dashboard-only — flags worst-outlier tab
+
+// ---------- config / persistence ----------
+const LS_KEY_API_BASE   = 'fcd:api_base';
+const LS_KEY_API_KEY    = 'fcd:api_key';
+const LS_KEY_LIBRARY_ID = 'fcd:library_id';
+const LS_KEY_PERSON_ID  = 'fcd:person_id';
+const LS_KEY_FILTER     = 'fcd:filter';
+// Reviewed map is person-scoped — fcd:reviewed:{personId} — so progress on
+// subject A doesn't pollute subject B's counts. Helpers below.
+const reviewedKey = (personId) => `fcd:reviewed:${personId}`;
+
+function loadReviewed(personId) {
+  try {
+    return JSON.parse(localStorage.getItem(reviewedKey(personId)) || '{}');
+  } catch { return {}; }
+}
+function saveReviewed(personId, map) {
+  localStorage.setItem(reviewedKey(personId), JSON.stringify(map));
+}
+
+// ---------- toast ----------
+const toastHost = document.getElementById('toast-host');
+function toast(msg, kind = '', ttl = 2500) {
+  const el = document.createElement('div');
+  el.className = `toast ${kind}`;
+  el.textContent = msg;
+  toastHost.appendChild(el);
+  setTimeout(() => el.remove(), ttl);
+}
+
+// Trigger the green-pulse confirmation animation on a button. Used in
+// place of toast() for routine successful actions — keeps the user's
+// gaze on the button they just clicked instead of pulling it to the
+// bottom of the screen.
+function flashButton(btn) {
+  if (!btn) return;
+  // Reset so a rapid second action re-runs the animation. Reading
+  // offsetWidth forces a synchronous reflow between class removal and
+  // re-add, which is what restarts the keyframes.
+  btn.classList.remove('flash');
+  void btn.offsetWidth;
+  btn.classList.add('flash');
+}
+
+// ---------- API client ----------
+// Hard cap on every request. fetch() has no default timeout; without
+// this, a stalled PATCH would leave state.actionInFlight true forever
+// and lock the whole UI (operator can't even Prev/Next) until reload.
+const REQUEST_TIMEOUT_MS = 30000;
+
+class Client {
+  constructor(base, key) { this.base = base.replace(/\/$/, ''); this.key = key; }
+  async _req(method, path, body) {
+    const ctl = new AbortController();
+    const timer = setTimeout(() => ctl.abort(), REQUEST_TIMEOUT_MS);
+    const init = {
+      method,
+      headers: { 'Authorization': `Bearer ${this.key}` },
+      signal: ctl.signal,
+    };
+    if (body !== undefined) {
+      init.headers['Content-Type'] = 'application/json';
+      init.body = JSON.stringify(body);
+    }
+    let r;
+    try {
+      r = await fetch(`${this.base}${path}`, init);
+    } catch (e) {
+      if (e.name === 'AbortError') {
+        throw new Error(`${method} ${path} → timed out after ${REQUEST_TIMEOUT_MS / 1000}s`);
+      }
+      throw e;
+    } finally {
+      clearTimeout(timer);
+    }
+    if (!r.ok) {
+      let detail = '';
+      try { detail = JSON.stringify(await r.json()); } catch { detail = await r.text(); }
+      throw new Error(`${method} ${path} → ${r.status}: ${detail}`);
+    }
+    if (r.status === 204) return null;
+    return r.json();
+  }
+  getFace(faceId, libraryId) {
+    return this._req('GET', `/api/faces/${faceId}?library_id=${encodeURIComponent(libraryId)}`);
+  }
+  getPerson(personId) {
+    return this._req('GET', `/api/people/${personId}`);
+  }
+  // Subject lookup at snapshot-build time. Includes cluster_metrics so the
+  // header can show pairwise_p90 / face_count without a follow-up call.
+  getPersonWithMetrics(personId) {
+    return this._req('GET', `/api/people/${personId}?include=cluster_metrics`);
+  }
+  updateFace(faceId, libraryId, personId) {
+    return this._req('PATCH', `/api/faces/${faceId}?library_id=${encodeURIComponent(libraryId)}`,
+      { person_id: personId });
+  }
+  listFacesByIds(faceIds, libraryId) {
+    const qs = new URLSearchParams();
+    faceIds.forEach(id => qs.append('ids', id));
+    qs.set('library_id', libraryId);
+    qs.set('limit', String(Math.max(1, Math.min(100, faceIds.length))));
+    return this._req('GET', `/api/faces?${qs}`);
+  }
+  // One page of subject faces with cluster_assignment so we get
+  // distance_to_person + candidate Persons (with distances) in the same
+  // round-trip. Cursor is the last face's id from the previous page.
+  listFacesPage(personId, libraryId, startingAfterId) {
+    const qs = new URLSearchParams();
+    qs.set('person_id', personId);
+    qs.set('library_id', libraryId);
+    qs.set('include', 'cluster_assignment');
+    qs.set('limit', '200');
+    if (startingAfterId) qs.set('starting_after_id', startingAfterId);
+    return this._req('GET', `/api/faces?${qs}`);
+  }
+  listAssetsByIds(assetIds, libraryId) {
+    const qs = new URLSearchParams();
+    assetIds.forEach(id => qs.append('ids', id));
+    qs.set('library_id', libraryId);
+    qs.set('limit', String(Math.max(1, Math.min(100, assetIds.length))));
+    return this._req('GET', `/api/assets?${qs}`);
+  }
+  listLibraries() {
+    return this._req('GET', '/api/libraries');
+  }
+  // All named persons in the library, with cluster_metrics for the
+  // candidate-thumbnail prefetch and the "cluster loose" badge. Walks the
+  // pagination cursor to completion — typical libraries have <200 named
+  // persons so usually one round-trip.
+  async listAllNamedPeople(libraryId) {
+    const out = [];
+    let cursor = null;
+    while (true) {
+      const qs = new URLSearchParams();
+      qs.set('library_id', libraryId);
+      qs.set('include', 'cluster_metrics');
+      qs.set('name_filter', 'named');
+      qs.set('limit', '200');
+      if (cursor) qs.set('starting_after_id', cursor);
+      const page = await this._req('GET', `/api/people?${qs}`);
+      out.push(...(page.data || []));
+      if (!page.has_more || !page.data?.length) break;
+      cursor = page.data[page.data.length - 1].id;
+    }
+    return out;
+  }
+}
+
+// ---------- state ----------
+const PREFETCH_LOOKAHEAD = 32;   // faces ahead of current to keep warm
+const PREFETCH_BATCH_SIZE = 100; // matches MAX_BULK_GET_IDS server-side
+
+const state = {
+  snapshot: null,
+  client: null,
+  libraries: [],      // populated after creds are saved
+  libraryId: null,
+  personId: null,
+  peoplePicker: [],   // named persons in selected library, sorted by face_count desc
+  faces: [],          // current filtered list
+  filter: 'closer',
+  index: 0,
+  reviewed: {},       // map face_id -> 'skipped' | 'reassigned' | 'detached' | 'accepted' (subject-scoped)
+  faceCache: new Map(),    // face_id -> face response (asset_urls)
+  assetCache: new Map(),   // asset_id -> asset response (full-asset variant URLs)
+  personCache: new Map(),  // person_id -> person response
+  history: [],             // for undo: { faceId, prevPersonId, action }
+  prefetchInFlight: false, // guard so we don't fire overlapping prefetches
+  actionInFlight: false,   // guard so concurrent keystrokes don't double-advance
+  // Records the person_id we have most recently sent to the server for
+  // each face, populated after every successful PATCH. Kept separate
+  // from faceCache so a synthetic entry can't hide the asset_urls a
+  // later ensureFace needs. Used by currentPersonId() to drive Undo.
+  lastAssigned: new Map(),
+};
+
+// ---------- snapshot building ----------
+// Live fan-out against the public API — no server-side build step:
+//
+// * Subject Person — for the header (name, pairwise_p90, face_count).
+// * All named Persons in the library — for candidate thumbnails and
+//   per-candidate "cluster loose" badges.
+// * Every Face on the subject Person — paginated, with
+//   include=cluster_assignment so each row already carries
+//   distance_to_person and the top-K candidate Persons with distances.
+//
+// The three per-face flags (closer_to_other / sibling_ambig /
+// within_distance_gate) are derived client-side from the closest *named*
+// candidate's distance — matching the original snapshot SQL's
+// `WHERE name IS NOT NULL` filter on candidates. Unnamed clusters can't
+// be a triage target (the dashboard renders candidate names), so they're
+// dropped before the flags are computed.
+async function buildSnapshot(libraryId, personId, peopleAll, onProgress) {
+  // Subject + first faces page don't depend on each other, so run them
+  // concurrently with the named-people list (when we have to fetch it).
+  // ``peopleAll`` is passed in by callers that already loaded the list
+  // (the common case — the user just used the picker); we only paginate
+  // it again when re-entering cold (e.g., reload landing on a saved
+  // person id with no picker pass).
+  const peoplePromise = peopleAll
+    ? Promise.resolve(peopleAll)
+    : state.client.listAllNamedPeople(libraryId);
+  const [subject, people, firstFaces] = await Promise.all([
+    state.client.getPersonWithMetrics(personId),
+    peoplePromise,
+    state.client.listFacesPage(personId, libraryId, null),
+  ]);
+  const allFaces = [...(firstFaces.data || [])];
+  if (onProgress) onProgress(allFaces.length);
+  let cursor = firstFaces.has_more && allFaces.length
+    ? allFaces[allFaces.length - 1].id : null;
+  while (cursor) {
+    const page = await state.client.listFacesPage(personId, libraryId, cursor);
+    const rows = page.data || [];
+    allFaces.push(...rows);
+    if (onProgress) onProgress(allFaces.length);
+    cursor = page.has_more && rows.length ? rows[rows.length - 1].id : null;
+  }
+
+  const faces = allFaces.map(f => {
+    // Match the original SQL's `WHERE name IS NOT NULL` constraint:
+    // unnamed clusters render as "null" candidate buttons and aren't a
+    // useful triage target (the operator can Detach instead).
+    const namedCands = (f.cluster_assignment?.candidates ?? [])
+      .filter(c => c.name);
+    const cands = namedCands.map(c => ({
+      id: c.person_id, name: c.name, d: c.distance,
+    }));
+    // Faces with no centroid on the assigned Person come back with
+    // distance_to_person = null. Treat as +Infinity so they sort to the
+    // front of "All" / "Worst outliers" rather than disappearing.
+    const d_current = f.cluster_assignment?.distance_to_person ?? Infinity;
+    const top = cands[0] ?? null;
+    return {
+      face_id: f.id,
+      asset_id: f.asset_id,
+      bbox: f.bounding_box,
+      d_current,
+      candidates: cands,
+      closer_to_other:      top !== null && top.d < d_current,
+      sibling_ambig:        top !== null && Math.abs(top.d - d_current) < SIBLING_MARGIN,
+      within_distance_gate: top !== null && top.d < DISTANCE_GATE,
+    };
+  });
+  // Match the snapshot SQL's ORDER BY d_subject DESC: worst-fit first
+  // when no other filter is active.
+  faces.sort((a, b) => b.d_current - a.d_current);
+
+  return {
+    library_id: libraryId,
+    subject: {
+      id: subject.id,
+      name: subject.name,
+      pairwise_p90: subject.cluster_metrics?.pairwise_p90 ?? null,
+      face_count: subject.cluster_metrics?.face_count ?? null,
+    },
+    people: people.map(p => ({
+      id: p.id,
+      name: p.name,
+      pairwise_p90: p.cluster_metrics?.pairwise_p90 ?? null,
+      face_count: p.cluster_metrics?.face_count ?? null,
+    })),
+    faces,
+  };
+}
+
+function applyFilter(filter) {
+  const all = state.snapshot.faces;
+  let list = all;
+  if (filter === 'closer')      list = all.filter(f => f.closer_to_other);
+  else if (filter === 'ambig')  list = all.filter(f => f.sibling_ambig);
+  else if (filter === 'gate')   list = all.filter(f => f.within_distance_gate);
+  else if (filter === 'outliers') {
+    list = all.filter(f => f.d_current >= OUTLIER_DISTANCE).sort((a, b) => b.d_current - a.d_current);
+  }
+  else if (filter === 'all')    list = [...all].sort((a, b) => b.d_current - a.d_current);
+  state.faces = list;
+  state.index = 0;
+  // Skip past already-reviewed faces
+  while (state.index < state.faces.length && state.reviewed[state.faces[state.index].face_id]) {
+    state.index += 1;
+  }
+}
+
+// ---------- prefetch helpers ----------
+async function ensureFace(faceId) {
+  if (state.faceCache.has(faceId)) return state.faceCache.get(faceId);
+  const r = await state.client.getFace(faceId, state.snapshot.library_id);
+  state.faceCache.set(faceId, r);
+  return r;
+}
+
+async function ensureAsset(assetId) {
+  if (state.assetCache.has(assetId)) return state.assetCache.get(assetId);
+  const resp = await state.client.listAssetsByIds([assetId], state.snapshot.library_id);
+  const a = resp && resp.data && resp.data[0];
+  if (a) state.assetCache.set(assetId, a);
+  return a;
+}
+
+// Warm the cache for upcoming faces. Without this, every advance pays
+// a metadata round-trip + a fresh CDN download for the face crop.
+//
+// We batch-fetch the next PREFETCH_LOOKAHEAD face IDs (and their parent
+// assets, so the "open asset" link can hit a signed CDN URL instead of
+// a Bearer-auth API endpoint), then kick off a hidden ``Image`` load
+// for each thumbnail URL so the browser stashes the bytes in its HTTP
+// cache. By the time the user advances, both the metadata and the
+// image are already local.
+async function prefetchAhead() {
+  if (state.prefetchInFlight) return;
+  // Track where we started so we can detect "user advanced past the
+  // window we just prefetched" — if so, fire another batch from finally
+  // instead of letting the next advance pay the full round-trip.
+  const startIndex = state.index;
+  const needFaces = [];
+  const needAssets = new Set();
+  for (let i = startIndex;
+       i < state.faces.length && needFaces.length < PREFETCH_LOOKAHEAD;
+       i++) {
+    const f = state.faces[i];
+    if (!state.faceCache.has(f.face_id)) needFaces.push(f.face_id);
+    if (!state.assetCache.has(f.asset_id)) needAssets.add(f.asset_id);
+  }
+  if (needFaces.length === 0 && needAssets.size === 0) return;
+
+  state.prefetchInFlight = true;
+  try {
+    const tasks = [];
+
+    for (let i = 0; i < needFaces.length; i += PREFETCH_BATCH_SIZE) {
+      const chunk = needFaces.slice(i, i + PREFETCH_BATCH_SIZE);
+      tasks.push((async () => {
+        try {
+          const resp = await state.client.listFacesByIds(chunk, state.snapshot.library_id);
+          for (const face of (resp && resp.data) || []) {
+            state.faceCache.set(face.id, face);
+            const url = face.asset_urls && face.asset_urls.thumbnail && face.asset_urls.thumbnail.url;
+            if (url) {
+              // Detached <img> — never inserted in DOM, just primes the
+              // browser's HTTP cache so the real <img src> hits cache.
+              const im = new Image();
+              im.src = url;
+            }
+          }
+        } catch (e) { console.warn('Face prefetch chunk failed:', e); }
+      })());
+    }
+
+    const assetIds = [...needAssets];
+    for (let i = 0; i < assetIds.length; i += PREFETCH_BATCH_SIZE) {
+      const chunk = assetIds.slice(i, i + PREFETCH_BATCH_SIZE);
+      tasks.push((async () => {
+        try {
+          const resp = await state.client.listAssetsByIds(chunk, state.snapshot.library_id);
+          for (const asset of (resp && resp.data) || []) {
+            state.assetCache.set(asset.id, asset);
+            // Warm the browser's image cache for the inline asset thumb,
+            // same trick we use for face crops above.
+            const url = pickAssetThumbUrl(asset);
+            if (url) {
+              const im = new Image();
+              im.src = url;
+            }
+          }
+        } catch (e) { console.warn('Asset prefetch chunk failed:', e); }
+      })());
+    }
+
+    await Promise.all(tasks);
+  } finally {
+    state.prefetchInFlight = false;
+    // If the operator hammered through faces during this fetch, the
+    // current index now points beyond what we just warmed — chase it.
+    if (state.index > startIndex) prefetchAhead();
+  }
+}
+
+// Pick the best variant URL for "open this in a new tab". Prefer a
+// browser-friendly mid-size variant; fall back through the chain.
+function pickAssetViewUrl(asset) {
+  const urls = asset && asset.asset_urls;
+  if (!urls) return null;
+  for (const key of ['preview', 'fullsize', 'original', 'thumbnail']) {
+    if (urls[key] && urls[key].url) return urls[key].url;
+  }
+  return null;
+}
+
+// Best variant URL for *inline* display. Smaller is better here — we're
+// rendering many of these and prefetching ahead. Falls forward through
+// larger variants if the small ones are missing.
+function pickAssetThumbUrl(asset) {
+  const urls = asset && asset.asset_urls;
+  if (!urls) return null;
+  for (const key of ['thumbnail', 'preview', 'fullsize', 'original']) {
+    if (urls[key] && urls[key].url) return urls[key].url;
+  }
+  return null;
+}
+
+// Warm the per-Person thumbnail cache up-front so candidate buttons don't
+// pop in. Only fetches Persons that actually appear as a candidate on at
+// least one face — typically O(faces × 5) deduped, much smaller than
+// "every named person in the library." (Calvin's 872-face cluster
+// dedupes to a couple dozen distinct candidate Persons; bounding here
+// avoids fanning out hundreds of Bearer-auth requests on big libraries.)
+async function prefetchPersonThumbs() {
+  const ids = new Set();
+  for (const f of state.snapshot.faces) {
+    for (const c of f.candidates) ids.add(c.id);
+  }
+  await Promise.all([...ids].map(async id => {
+    if (state.personCache.has(id)) return;
+    try {
+      const p = await state.client.getPerson(id);
+      state.personCache.set(id, p);
+    } catch (e) {
+      console.warn('Failed to load person', id, e);
+    }
+  }));
+}
+
+// ---------- rendering ----------
+const subjectLabel = document.getElementById('subject-label');
+const changeSubjectLink = document.getElementById('change-subject');
+const tabs = document.getElementById('filter-tabs');
+const content = document.getElementById('content');
+const credsPanel = document.getElementById('creds-panel');
+const libraryPanel = document.getElementById('library-panel');
+const personPanel = document.getElementById('person-panel');
+const progress = document.getElementById('progress');
+const faceHost = document.getElementById('face-card-host');
+const undoBtn = document.getElementById('undo-btn');
+
+// Hide every picker stage. The flow function then unhides exactly one at
+// a time — keeps state.* and DOM in sync without ad-hoc toggles.
+function hideAllPanels() {
+  credsPanel.hidden = true;
+  libraryPanel.hidden = true;
+  personPanel.hidden = true;
+  content.hidden = true;
+}
+
+function renderTabs() {
+  const counts = {
+    closer:   state.snapshot.faces.filter(f => f.closer_to_other).length,
+    ambig:    state.snapshot.faces.filter(f => f.sibling_ambig).length,
+    gate:     state.snapshot.faces.filter(f => f.within_distance_gate).length,
+    outliers: state.snapshot.faces.filter(f => f.d_current >= OUTLIER_DISTANCE).length,
+    all:      state.snapshot.faces.length,
+  };
+  const defs = [
+    ['closer',   `Closer to another (${counts.closer})`],
+    ['ambig',    `Sibling-ambiguous (${counts.ambig})`],
+    ['gate',     `Any in-gate alt (${counts.gate})`],
+    ['outliers', `Worst outliers (${counts.outliers})`],
+    ['all',      `All (${counts.all})`],
+  ];
+  tabs.innerHTML = '';
+  for (const [key, label] of defs) {
+    const b = document.createElement('button');
+    b.textContent = label;
+    if (key === state.filter) b.classList.add('active');
+    b.onclick = () => { setFilter(key); };
+    tabs.appendChild(b);
+  }
+}
+
+function setFilter(filter) {
+  state.filter = filter;
+  localStorage.setItem(LS_KEY_FILTER, filter);
+  applyFilter(filter);
+  renderTabs();
+  render();
+  prefetchAhead();
+}
+
+function renderProgress() {
+  const total = state.faces.length;
+  const reviewed = state.faces.filter(f => state.reviewed[f.face_id]).length;
+  progress.innerHTML = `
+    <span><strong>${state.index + 1}</strong> / ${total}</span>
+    <span><strong>${reviewed}</strong> reviewed in this filter</span>
+    <span>${countByAction('reassigned')} reassigned · ${countByAction('detached')} detached · ${countByAction('accepted')} accepted · ${countByAction('skipped')} skipped (overall)</span>
+  `;
+}
+
+function countByAction(action) {
+  let n = 0;
+  for (const v of Object.values(state.reviewed)) if (v === action) n += 1;
+  return n;
+}
+
+function badgeFor(face) {
+  const out = [];
+  if (face.closer_to_other) out.push(`<span class="badge bad">closer-to-other</span>`);
+  if (face.sibling_ambig)   out.push(`<span class="badge warn">sibling-ambig</span>`);
+  if (face.within_distance_gate) out.push(`<span class="badge warn">in-gate alt</span>`);
+  return out.join(' ');
+}
+
+async function render() {
+  // Close any open lightbox before re-rendering — its image references
+  // the previous face's asset and would otherwise stay open showing
+  // stale content.
+  closeLightbox();
+  if (!state.faces.length) {
+    faceHost.innerHTML = `<div class="card">No faces match this filter.</div>`;
+    progress.innerHTML = '';
+    return;
+  }
+  if (state.index >= state.faces.length) {
+    faceHost.innerHTML = `<div class="card">🎉 End of list. Switch filters above or pick another face from the list.</div>`;
+    renderProgress();
+    return;
+  }
+
+  const face = state.faces[state.index];
+  renderProgress();
+
+  const subject = state.snapshot.subject;
+  const reviewedTag = state.reviewed[face.face_id]
+    ? `<span class="badge good">${state.reviewed[face.face_id]}</span>` : '';
+
+  // Render skeleton first; populate thumbnails async
+  faceHost.innerHTML = `
+    <div class="card">
+      <div class="face-meta">
+        ${reviewedTag}
+        ${badgeFor(face)}
+        <span><strong>${escapeHtml(subject.name)}</strong> · d=${face.d_current.toFixed(3)}</span>
+        <span> · face <code>${face.face_id}</code></span>
+        <span> · <a id="asset-link" target="_blank" rel="noopener">open asset ↗</a></span>
+      </div>
+      <div class="thumb-row">
+        <div class="face-img-wrap empty" id="face-img-wrap">loading…</div>
+        <div class="asset-img-wrap empty" id="asset-img-wrap">loading…</div>
+      </div>
+      <div class="candidates-section">
+        <h3 class="candidates-header">Nearby faces</h3>
+        <div class="candidates" id="candidates"></div>
+      </div>
+    </div>
+  `;
+
+  // The face/asset fetches are async; the user can advance (1–5, D, A, →,
+  // skip) before they resolve. Element ids are reused across renders, so a
+  // stale .then() would write the previous face's thumbnail/bbox/click
+  // handler into the next face's slot. Bail out if the face under review
+  // has changed since this render started.
+  const renderedFaceId = face.face_id;
+  const stillCurrent = () => state.faces[state.index] && state.faces[state.index].face_id === renderedFaceId;
+
+  // Populate face thumbnail
+  ensureFace(face.face_id).then(f => {
+    if (!stillCurrent()) return;
+    const wrap = document.getElementById('face-img-wrap');
+    if (!wrap) return;
+    const url = f && f.asset_urls && f.asset_urls.thumbnail && f.asset_urls.thumbnail.url;
+    if (url) {
+      wrap.classList.remove('empty');
+      wrap.innerHTML = `<img src="${url}" alt="face crop" />`;
+    } else {
+      wrap.textContent = 'no thumbnail';
+    }
+  }).catch(e => {
+    if (!stillCurrent()) return;
+    const wrap = document.getElementById('face-img-wrap');
+    if (wrap) wrap.textContent = 'load failed';
+    console.warn(e);
+  });
+
+  // "Open asset" link + parent-asset thumbnail with a bounding-box
+  // overlay highlighting the face under review. Both come from the
+  // same asset response, prefetched alongside the face metadata.
+  ensureAsset(face.asset_id).then(a => {
+    if (!stillCurrent()) return;
+    const link = document.getElementById('asset-link');
+    if (link) {
+      const u = pickAssetViewUrl(a);
+      if (u) {
+        link.href = u;
+      } else {
+        link.removeAttribute('href');
+        link.textContent = 'asset url unavailable';
+      }
+    }
+
+    const wrap = document.getElementById('asset-img-wrap');
+    if (wrap && a) {
+      const url = pickAssetThumbUrl(a);
+      if (!url) {
+        wrap.textContent = 'no asset thumbnail';
+        return;
+      }
+      wrap.classList.remove('empty');
+      wrap.classList.add('clickable');
+      wrap.title = 'Click to enlarge';
+      // Use percentages so the overlay lines up regardless of how the
+      // image is scaled by responsive layout. Requires asset width/height
+      // (always present for image assets).
+      const overlayStyle = bboxOverlayStyle(a, face.bbox);
+      const overlayHtml = overlayStyle
+        ? `<div class="asset-bbox-overlay" style="${overlayStyle}"></div>`
+        : '';
+      wrap.innerHTML = `<img src="${url}" alt="parent asset" />${overlayHtml}`;
+      wrap.onclick = () => openLightbox(a, face.bbox);
+    }
+  }).catch(e => {
+    if (!stillCurrent()) return;
+    console.warn('Asset fetch failed', e);
+    const wrap = document.getElementById('asset-img-wrap');
+    if (wrap) wrap.textContent = 'load failed';
+  });
+
+  // Render candidates with their thumbnails (from cache)
+  const cands = (face.candidates || []).slice(0, 5);
+  const candHost = document.getElementById('candidates');
+  if (!cands.length) {
+    candHost.innerHTML = `<div class="hint">No candidate Persons within ${CANDIDATE_WINDOW} cosine distance — no obvious destination.</div>`;
+  } else {
+    candHost.innerHTML = '';
+    cands.forEach((c, i) => {
+      const inGate = c.d < DISTANCE_GATE;
+      const personMeta = state.snapshot.people.find(p => p.id === c.id);
+      const cohesionWarn = personMeta && personMeta.pairwise_p90 != null && personMeta.pairwise_p90 >= COHESION_GATE
+        ? ` · <span class="badge warn">cluster loose</span>` : '';
+      const btn = document.createElement('button');
+      btn.className = 'candidate' + (inGate ? ' in-gate' : ' out-gate');
+      btn.dataset.personId = c.id;
+      const personObj = state.personCache.get(c.id);
+      const thumbUrl = personObj && personObj.asset_urls && personObj.asset_urls.thumbnail && personObj.asset_urls.thumbnail.url;
+      btn.innerHTML = `
+        <div class="candidate-thumb">${thumbUrl ? `<img src="${thumbUrl}" alt="" />` : '?'}</div>
+        <div class="candidate-meta">
+          <div class="candidate-name">${escapeHtml(c.name)}</div>
+          <div class="candidate-dist">d=${c.d.toFixed(3)} ${inGate ? '✓ in gate' : '· out of gate'}${cohesionWarn}</div>
+        </div>
+        <kbd>${i + 1}</kbd>
+      `;
+      btn.onclick = () => assignTo(c.id);
+      candHost.appendChild(btn);
+    });
+  }
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+// Compute the inline style for the bbox overlay as percentages of the
+// asset's natural dimensions, so the same string works at any rendered
+// size (thumbnail, preview lightbox, etc).
+function bboxOverlayStyle(asset, bbox) {
+  if (!asset || !asset.width || !asset.height) return '';
+  if (!bbox || typeof bbox.x !== 'number') return '';
+  const left   = (bbox.x / asset.width)  * 100;
+  const top    = (bbox.y / asset.height) * 100;
+  const width  = (bbox.w / asset.width)  * 100;
+  const height = (bbox.h / asset.height) * 100;
+  return `left:${left}%;top:${top}%;width:${width}%;height:${height}%`;
+}
+
+// ---------- lightbox ----------
+let lightboxEl = null;
+
+function openLightbox(asset, bbox) {
+  closeLightbox();
+  // Prefer preview (mid-size, browser-friendly); fall through to larger
+  // variants if missing. We don't use thumbnail here — the whole point
+  // is that it's bigger than what the inline thumb shows.
+  const urls = asset && asset.asset_urls;
+  const url = (urls && (
+    (urls.preview && urls.preview.url) ||
+    (urls.fullsize && urls.fullsize.url) ||
+    (urls.original && urls.original.url) ||
+    (urls.thumbnail && urls.thumbnail.url)
+  )) || null;
+  if (!url) { toast('No larger variant available', 'error'); return; }
+
+  const overlayStyle = bboxOverlayStyle(asset, bbox);
+  const overlayHtml = overlayStyle
+    ? `<div class="asset-bbox-overlay" style="${overlayStyle}"></div>`
+    : '';
+  lightboxEl = document.createElement('div');
+  lightboxEl.className = 'lightbox';
+  lightboxEl.innerHTML = `
+    <button class="lightbox-close" type="button" aria-label="Close">Close (Esc)</button>
+    <div class="lightbox-frame">
+      <img src="${url}" alt="parent asset" />
+      ${overlayHtml}
+    </div>
+  `;
+  // Click-outside-image to close. The image and bbox sit inside
+  // .lightbox-frame; clicks on the backdrop bubble up here without
+  // hitting that subtree.
+  lightboxEl.addEventListener('click', (e) => {
+    if (e.target === lightboxEl || e.target.classList.contains('lightbox-close')) {
+      closeLightbox();
+    }
+  });
+  document.body.appendChild(lightboxEl);
+}
+
+function closeLightbox() {
+  if (lightboxEl) {
+    lightboxEl.remove();
+    lightboxEl = null;
+  }
+}
+
+function lightboxOpen() { return lightboxEl !== null; }
+
+// ---------- actions ----------
+// Read the face's current person_id for Undo. Prefer state.lastAssigned
+// (anything we've PATCHed this session) so a re-reassigned face Undoes
+// to the *previous* assignee, not the snapshot subject. Falls back to
+// the snapshot subject — the SQL filter (`person_id = subject.id`)
+// guarantees that's the right starting state for any first-time action.
+function currentPersonId(faceId) {
+  if (state.lastAssigned.has(faceId)) return state.lastAssigned.get(faceId);
+  return state.snapshot.subject.id;
+}
+
+// Record the person_id we just sent to the server. Called after every
+// successful PATCH so the next Undo target tracks reality. Kept in a
+// dedicated Map so a missing faceCache entry (e.g., user acted before
+// ensureFace resolved) doesn't silently drop the prev-assignment.
+function recordAssignment(faceId, personId) {
+  state.lastAssigned.set(faceId, personId);
+}
+
+async function assignTo(personId) {
+  if (state.actionInFlight) return;
+  if (state.index >= state.faces.length) return;
+  const face = state.faces[state.index];
+  // Flash the candidate button as soon as it's clicked so the feedback
+  // is immediate even if the PATCH hasn't returned yet. The animation
+  // lasts ~600ms; the API call typically completes inside that window.
+  flashButton(document.querySelector(`.candidate[data-person-id="${CSS.escape(personId)}"]`));
+  state.actionInFlight = true;
+  try {
+    const prevPersonId = currentPersonId(face.face_id);
+    await state.client.updateFace(face.face_id, state.snapshot.library_id, personId);
+    recordAssignment(face.face_id, personId);
+    state.reviewed[face.face_id] = 'reassigned';
+    state.history.push({ faceId: face.face_id, prevPersonId, action: 'reassigned' });
+    saveReviewed(state.personId, state.reviewed);
+    refreshUndo();
+    advance();
+  } catch (e) {
+    toast(`Assign failed: ${e.message}`, 'error', 6000);
+    console.error(e);
+  } finally {
+    state.actionInFlight = false;
+  }
+}
+
+async function detachCurrent() {
+  if (state.actionInFlight) return;
+  if (state.index >= state.faces.length) return;
+  const face = state.faces[state.index];
+  flashButton(document.getElementById('detach-btn'));
+  state.actionInFlight = true;
+  try {
+    const prevPersonId = currentPersonId(face.face_id);
+    await state.client.updateFace(face.face_id, state.snapshot.library_id, null);
+    recordAssignment(face.face_id, null);
+    state.reviewed[face.face_id] = 'detached';
+    state.history.push({ faceId: face.face_id, prevPersonId, action: 'detached' });
+    saveReviewed(state.personId, state.reviewed);
+    refreshUndo();
+    advance();
+  } catch (e) {
+    toast(`Detach failed: ${e.message}`, 'error', 6000);
+    console.error(e);
+  } finally {
+    state.actionInFlight = false;
+  }
+}
+
+function skipCurrent() {
+  if (state.actionInFlight) return;
+  if (state.index >= state.faces.length) return;
+  const face = state.faces[state.index];
+  flashButton(document.getElementById('skip-btn'));
+  state.reviewed[face.face_id] = 'skipped';
+  state.history.push({ faceId: face.face_id, prevPersonId: currentPersonId(face.face_id), action: 'skipped' });
+  saveReviewed(state.personId, state.reviewed);
+  refreshUndo();
+  advance();
+}
+
+function acceptCurrent() {
+  // "This face really is the subject — confirm and move on." Local-only
+  // mark, no API call. Tracked separately from 'skipped' so the user can
+  // distinguish "confirmed correct" from "unsure, revisit later".
+  if (state.actionInFlight) return;
+  if (state.index >= state.faces.length) return;
+  const face = state.faces[state.index];
+  flashButton(document.getElementById('accept-btn'));
+  state.reviewed[face.face_id] = 'accepted';
+  state.history.push({ faceId: face.face_id, prevPersonId: currentPersonId(face.face_id), action: 'accepted' });
+  saveReviewed(state.personId, state.reviewed);
+  refreshUndo();
+  advance();
+}
+
+async function undoLast() {
+  if (state.actionInFlight) return;
+  const last = state.history.pop();
+  refreshUndo();
+  if (!last) return;
+  flashButton(undoBtn);
+  state.actionInFlight = true;
+  try {
+    // 'skipped' and 'accepted' are local-only marks — no server PATCH
+    // happened, so undoing them is just clearing the reviewed flag below.
+    if (last.action !== 'skipped' && last.action !== 'accepted') {
+      try {
+        await state.client.updateFace(last.faceId, state.snapshot.library_id, last.prevPersonId);
+        recordAssignment(last.faceId, last.prevPersonId);
+      } catch (e) {
+        // The PATCH failed: server still has the new person_id. Restore
+        // the history entry so the user can retry, and leave the local
+        // 'reviewed' flag in place so the UI still shows the face as
+        // acted-on (which it is, on the server).
+        state.history.push(last);
+        refreshUndo();
+        toast(`Undo failed (server unchanged, retry available): ${e.message}`, 'error', 6000);
+        console.error(e);
+        return;
+      }
+    }
+    delete state.reviewed[last.faceId];
+    saveReviewed(state.personId, state.reviewed);
+    // Move back to the face we just undid
+    const idx = state.faces.findIndex(f => f.face_id === last.faceId);
+    if (idx >= 0) state.index = idx;
+    render();
+  } finally {
+    state.actionInFlight = false;
+  }
+}
+
+function refreshUndo() { undoBtn.disabled = state.history.length === 0; }
+
+function advance() {
+  do { state.index += 1; }
+  while (state.index < state.faces.length && state.reviewed[state.faces[state.index].face_id]);
+  render();
+  prefetchAhead();
+}
+
+function back() {
+  // Step to the immediate previous face — do NOT skip reviewed ones.
+  // The whole point of Prev is to revisit a recent decision (e.g.
+  // I just hit "1" and meant "2"); skipping past reviewed faces
+  // makes that impossible.
+  if (state.index > 0) {
+    state.index -= 1;
+    render();
+  }
+}
+
+// ---------- bindings ----------
+// Wrap nav handlers (Prev/Next, ←/→) so they don't race a pending PATCH.
+// Without this, pressing `1` then `→` before the first PATCH resolves
+// would advance once for the arrow, then again when assignTo's awaited
+// advance() runs — silently skipping the face in between.
+function navAdvance() { if (!state.actionInFlight) advance(); }
+function navBack() { if (!state.actionInFlight) back(); }
+
+document.getElementById('next-btn').onclick = navAdvance;
+document.getElementById('prev-btn').onclick = navBack;
+document.getElementById('accept-btn').onclick = acceptCurrent;
+document.getElementById('skip-btn').onclick = skipCurrent;
+document.getElementById('detach-btn').onclick = detachCurrent;
+undoBtn.onclick = undoLast;
+
+window.addEventListener('keydown', (e) => {
+  if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+  // Lightbox owns the keyboard while open: Escape closes it, everything
+  // else is swallowed so the user can't accidentally assign/skip while
+  // looking at a zoomed photo.
+  if (lightboxOpen()) {
+    if (e.key === 'Escape') { e.preventDefault(); closeLightbox(); }
+    return;
+  }
+  if (state.index >= state.faces.length) {
+    if (e.key === 'ArrowLeft') navBack();
+    return;
+  }
+  const face = state.faces[state.index];
+  const cands = face.candidates || [];
+  if (/^[1-5]$/.test(e.key)) {
+    const n = parseInt(e.key, 10) - 1;
+    if (cands[n]) { e.preventDefault(); assignTo(cands[n].id); }
+  } else if (e.key === 'd' || e.key === 'D') { e.preventDefault(); detachCurrent(); }
+  else if (e.key === 'a' || e.key === 'A') { e.preventDefault(); acceptCurrent(); }
+  else if (e.key === 's' || e.key === 'S') { e.preventDefault(); skipCurrent(); }
+  else if (e.key === 'z' || e.key === 'Z') { e.preventDefault(); undoLast(); }
+  else if (e.key === 'ArrowRight') { e.preventDefault(); navAdvance(); }
+  else if (e.key === 'ArrowLeft') { e.preventDefault(); navBack(); }
+});
+
+// ---------- init / multi-stage flow ----------
+// Four stages, run in order; each is "skipped" if its prerequisites are
+// already satisfied (saved creds, single library, saved person). Going
+// "back" is just a panel toggle — see ``changeSubjectLink``.
+async function init() {
+  state.filter = localStorage.getItem(LS_KEY_FILTER) || 'closer';
+  document.getElementById('api-base').value = localStorage.getItem(LS_KEY_API_BASE) || 'https://api.gumnut.ai';
+  document.getElementById('api-key').value  = localStorage.getItem(LS_KEY_API_KEY)  || '';
+  document.getElementById('save-creds').onclick = onSaveCreds;
+  document.getElementById('library-continue').onclick = onLibraryContinue;
+  document.getElementById('person-filter').oninput = renderPersonList;
+  document.getElementById('switch-library').onclick = (e) => {
+    e.preventDefault();
+    localStorage.removeItem(LS_KEY_LIBRARY_ID);
+    localStorage.removeItem(LS_KEY_PERSON_ID);
+    state.libraryId = null;
+    state.personId = null;
+    state.peoplePicker = [];
+    runStage();
+  };
+  changeSubjectLink.onclick = (e) => {
+    e.preventDefault();
+    // Drop only the person — keep the library so we don't re-prompt for
+    // it on every subject switch (typical user has one library anyway).
+    localStorage.removeItem(LS_KEY_PERSON_ID);
+    state.personId = null;
+    state.snapshot = null;
+    runStage();
+  };
+
+  await runStage();
+}
+
+// Decides which panel to show based on current persisted state. Re-entrant —
+// safe to call after dropping a saved key (e.g., "Pick another person").
+async function runStage() {
+  hideAllPanels();
+  changeSubjectLink.hidden = true;
+
+  // Stage A — credentials
+  const base = localStorage.getItem(LS_KEY_API_BASE);
+  const key  = localStorage.getItem(LS_KEY_API_KEY);
+  if (!base || !key) {
+    credsPanel.hidden = false;
+    return;
+  }
+  state.client = new Client(base, key);
+
+  // Stage B — library picker. Cached library list short-circuits the
+  // round-trip on subject switches.
+  if (!state.libraries.length) {
+    document.getElementById('creds-hint').textContent = 'loading libraries…';
+    try {
+      state.libraries = await state.client.listLibraries();
+    } catch (e) {
+      toast(`Auth or network error: ${e.message}`, 'error', 6000);
+      document.getElementById('creds-hint').textContent = 'failed';
+      credsPanel.hidden = false;
+      return;
+    }
+    document.getElementById('creds-hint').textContent = '';
+  }
+  if (!state.libraries.length) {
+    credsPanel.hidden = false;
+    document.getElementById('creds-hint').textContent = 'no libraries on this account';
+    return;
+  }
+
+  // Resolve library: saved choice → still valid; one library → auto;
+  // otherwise prompt.
+  let libraryId = localStorage.getItem(LS_KEY_LIBRARY_ID);
+  if (libraryId && !state.libraries.some(l => l.id === libraryId)) {
+    libraryId = null;
+    localStorage.removeItem(LS_KEY_LIBRARY_ID);
+  }
+  if (!libraryId && state.libraries.length === 1) {
+    libraryId = state.libraries[0].id;
+    localStorage.setItem(LS_KEY_LIBRARY_ID, libraryId);
+  }
+  if (!libraryId) {
+    renderLibraryPicker();
+    libraryPanel.hidden = false;
+    return;
+  }
+  state.libraryId = libraryId;
+
+  // Stage C — person picker. Reload the named-person list whenever we
+  // arrive here (cache lives in state.peoplePicker, keyed by libraryId).
+  let personId = localStorage.getItem(LS_KEY_PERSON_ID);
+  if (!personId) {
+    // Unhide the panel before the fetch so the user sees the
+    // "loading people…" hint instead of a blank page.
+    personPanel.hidden = false;
+    await loadAndRenderPersonPicker();
+    return;
+  }
+  state.personId = personId;
+
+  // Stage D — cleanup view
+  await launchCleanup();
+}
+
+async function onSaveCreds() {
+  const base = document.getElementById('api-base').value.trim();
+  const key  = document.getElementById('api-key').value.trim();
+  if (!base || !key) { toast('Please fill in API base and key', 'error'); return; }
+  localStorage.setItem(LS_KEY_API_BASE, base);
+  localStorage.setItem(LS_KEY_API_KEY, key);
+  // Forget any cached library list so the next runStage refetches with
+  // the new credentials.
+  state.libraries = [];
+  await runStage();
+}
+
+function renderLibraryPicker() {
+  const sel = document.getElementById('library-select');
+  sel.innerHTML = '';
+  for (const lib of state.libraries) {
+    const opt = document.createElement('option');
+    opt.value = lib.id;
+    opt.textContent = `${lib.name} · ${lib.asset_count} assets`;
+    sel.appendChild(opt);
+  }
+}
+
+function onLibraryContinue() {
+  const sel = document.getElementById('library-select');
+  if (!sel.value) return;
+  localStorage.setItem(LS_KEY_LIBRARY_ID, sel.value);
+  state.libraryId = sel.value;
+  // New library -> drop any saved person from the previous library and
+  // any cached people list (it's library-scoped).
+  localStorage.removeItem(LS_KEY_PERSON_ID);
+  state.personId = null;
+  state.peoplePicker = [];
+  runStage();
+}
+
+async function loadAndRenderPersonPicker() {
+  const hint = document.getElementById('person-hint');
+  hint.textContent = 'loading people…';
+  try {
+    const people = await state.client.listAllNamedPeople(state.libraryId);
+    // cluster_metrics is null on empty Persons (no faces yet, no centroid).
+    // Push them to the bottom so the more-cleanup-needed clusters float
+    // to the top.
+    state.peoplePicker = people.slice().sort(
+      (a, b) => (b.cluster_metrics?.face_count ?? -1)
+              - (a.cluster_metrics?.face_count ?? -1)
+    );
+  } catch (e) {
+    toast(`Failed to load people: ${e.message}`, 'error', 6000);
+    hint.textContent = 'failed';
+    state.peoplePicker = [];
+    return;
+  }
+  hint.textContent = state.peoplePicker.length
+    ? `${state.peoplePicker.length} named person${state.peoplePicker.length === 1 ? '' : 's'} · `
+    : 'no named people in this library · ';
+  // Only show "Switch library" if there's actually somewhere to switch to.
+  document.getElementById('switch-library').hidden = state.libraries.length <= 1;
+  document.getElementById('person-filter').value = '';
+  renderPersonList();
+}
+
+function renderPersonList() {
+  const host = document.getElementById('person-list');
+  const filter = document.getElementById('person-filter').value.trim().toLowerCase();
+  const matches = filter
+    ? state.peoplePicker.filter(p => (p.name || '').toLowerCase().includes(filter))
+    : state.peoplePicker;
+  host.innerHTML = '';
+  if (!matches.length) {
+    host.innerHTML = `<div class="person-list-empty">No matches.</div>`;
+    return;
+  }
+  for (const p of matches) {
+    const row = document.createElement('div');
+    row.className = 'person-row';
+    const fc = p.cluster_metrics?.face_count;
+    const p90 = p.cluster_metrics?.pairwise_p90;
+    const fcStr = fc != null ? `${fc} faces` : 'no metrics';
+    const p90Str = p90 != null ? `p90=${p90.toFixed(3)}` : '';
+    row.innerHTML = `
+      <span class="name">${escapeHtml(p.name || '(unnamed)')}</span>
+      <span class="meta">${fcStr}${p90Str ? ' · ' + p90Str : ''}</span>
+    `;
+    row.onclick = () => onPickPerson(p.id);
+    host.appendChild(row);
+  }
+}
+
+function onPickPerson(personId) {
+  localStorage.setItem(LS_KEY_PERSON_ID, personId);
+  state.personId = personId;
+  runStage();
+}
+
+async function launchCleanup() {
+  // Reset session state for the new subject — caches, history, reviewed
+  // map, etc. — so a subject switch doesn't leak.
+  state.faceCache.clear();
+  state.assetCache.clear();
+  state.personCache.clear();
+  state.history = [];
+  state.lastAssigned.clear();
+  state.reviewed = loadReviewed(state.personId);
+
+  subjectLabel.textContent = 'loading…';
+  changeSubjectLink.hidden = false;
+  try {
+    state.snapshot = await buildSnapshot(
+      state.libraryId, state.personId,
+      // Reuse the named-people list the picker just fetched — same
+      // library, same filters, same expansion. Pass null when we
+      // landed here cold (e.g., reload on saved person id with no
+      // picker pass) so buildSnapshot fetches it itself.
+      state.peoplePicker.length ? state.peoplePicker : null,
+      (n) => { subjectLabel.textContent = `loading… ${n} faces`; }
+    );
+  } catch (e) {
+    // Most common: subject Person was deleted, or saved id no longer
+    // belongs to the user. Drop the saved id and bounce back to the
+    // person picker rather than leaving the operator stuck.
+    toast(`Failed to load subject: ${e.message}`, 'error', 8000);
+    localStorage.removeItem(LS_KEY_PERSON_ID);
+    state.personId = null;
+    await runStage();
+    return;
+  }
+
+  // Person thumbnails for candidate buttons (best-effort, parallel).
+  await prefetchPersonThumbs();
+
+  const subj = state.snapshot.subject;
+  // The subject's cluster_metrics block is null for an empty Person (no
+  // centroid yet) — pairwise_p90 / face_count default to null in that
+  // case. Render 'n/a' / '?' rather than crashing.
+  const p90Str = subj.pairwise_p90 != null ? subj.pairwise_p90.toFixed(3) : 'n/a';
+  const faceCountStr = subj.face_count != null ? subj.face_count : '?';
+  subjectLabel.textContent = `${subj.name} · p90=${p90Str} · ${faceCountStr} faces`;
+
+  hideAllPanels();
+  content.hidden = false;
+  applyFilter(state.filter);
+  renderTabs();
+  render();
+  prefetchAhead();
+}
+
+init().catch(e => {
+  toast(`Init failed: ${e.message}`, 'error', 8000);
+  console.error(e);
+});
+</script>
+</body>
+</html>
