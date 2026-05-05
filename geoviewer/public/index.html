@@ -1,0 +1,331 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Gumnut geoviewer</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+        --fg: #1a1a1a;
+        --muted: #6b6b6b;
+        --bg: #fafafa;
+        --card: #fff;
+        --border: #e3e3e3;
+        --accent: #2563eb;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --fg: #e8e8e8;
+          --muted: #9a9a9a;
+          --bg: #111;
+          --card: #1b1b1b;
+          --border: #2a2a2a;
+          --accent: #60a5fa;
+        }
+      }
+      * { box-sizing: border-box; }
+      html, body { margin: 0; padding: 0; }
+      body {
+        font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif;
+        background: var(--bg);
+        color: var(--fg);
+      }
+      header {
+        position: sticky;
+        top: 0;
+        z-index: 10;
+        background: var(--bg);
+        border-bottom: 1px solid var(--border);
+        padding: 12px 16px;
+        display: flex;
+        gap: 12px;
+        align-items: center;
+        flex-wrap: wrap;
+      }
+      header h1 { font-size: 16px; margin: 0 8px 0 0; font-weight: 600; }
+      header .spacer { flex: 1; }
+      header label { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); }
+      button {
+        font: inherit;
+        padding: 6px 14px;
+        border: 1px solid var(--border);
+        background: var(--card);
+        color: var(--fg);
+        border-radius: 6px;
+        cursor: pointer;
+      }
+      button:disabled { opacity: 0.4; cursor: not-allowed; }
+      button:not(:disabled):hover { border-color: var(--accent); }
+      #status { color: var(--muted); }
+      main {
+        padding: 16px;
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+        gap: 14px;
+      }
+      .card {
+        background: var(--card);
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        overflow: hidden;
+        display: flex;
+        flex-direction: column;
+      }
+      .card .thumb {
+        aspect-ratio: 4 / 3;
+        background: #000;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        color: #777;
+        font-size: 12px;
+      }
+      .card .thumb img {
+        width: 100%;
+        height: 100%;
+        object-fit: cover;
+        display: block;
+      }
+      .card .body { padding: 10px 12px 12px; font-size: 12px; }
+      .card .meta-line {
+        color: var(--muted);
+        font-size: 11px;
+        margin-bottom: 8px;
+        display: flex;
+        justify-content: space-between;
+        gap: 8px;
+      }
+      .card .id {
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        cursor: pointer;
+      }
+      .card dl {
+        display: grid;
+        grid-template-columns: 110px 1fr;
+        gap: 2px 8px;
+        margin: 0;
+      }
+      .card dt { color: var(--muted); font-weight: 500; }
+      .card dd { margin: 0; word-break: break-word; }
+      .card dd.null { color: var(--muted); }
+      .card .no-meta { color: var(--muted); font-style: italic; }
+      .card.hidden { display: none; }
+      footer {
+        padding: 16px;
+        display: flex;
+        justify-content: center;
+        align-items: center;
+        gap: 12px;
+        color: var(--muted);
+        flex-wrap: wrap;
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>Gumnut geoviewer</h1>
+      <span id="status">loading…</span>
+      <div class="spacer"></div>
+      <label>
+        <input type="checkbox" id="onlyGeo" />
+        Only with coordinates
+      </label>
+      <button id="prev" disabled>‹ Prev</button>
+      <button id="next" disabled>Next ›</button>
+    </header>
+    <main id="grid"></main>
+    <footer>
+      <button id="prevBottom" disabled>‹ Prev</button>
+      <span id="footerStatus"></span>
+      <button id="nextBottom" disabled>Next ›</button>
+    </footer>
+
+    <script type="module">
+      const GEO_FIELDS = [
+        "latitude",
+        "longitude",
+        "city",
+        "state",
+        "country",
+        "country_code",
+        "sublocation",
+        "place_name",
+        "timezone",
+        "display_label",
+      ];
+
+      const grid = document.getElementById("grid");
+      const status = document.getElementById("status");
+      const footerStatus = document.getElementById("footerStatus");
+      const prevBtns = [document.getElementById("prev"), document.getElementById("prevBottom")];
+      const nextBtns = [document.getElementById("next"), document.getElementById("nextBottom")];
+      const onlyGeo = document.getElementById("onlyGeo");
+
+      const setPrevDisabled = (v) => prevBtns.forEach((b) => (b.disabled = v));
+      const setNextDisabled = (v) => nextBtns.forEach((b) => (b.disabled = v));
+
+      // Cursor stack: each entry is the starting_after_id used to load that page.
+      // First page uses "" (no cursor). cursors[cursors.length - 1] is the current page.
+      const cursors = [""];
+      let currentPage = null; // { data, has_more }
+
+      function fmt(v) {
+        if (v === null || v === undefined || v === "") return null;
+        if (typeof v === "number") return Number.isInteger(v) ? String(v) : v.toFixed(6);
+        return String(v);
+      }
+
+      function renderCard(asset) {
+        const card = document.createElement("article");
+        card.className = "card";
+
+        const meta = asset.metadata || null;
+        const hasGeo = !!(meta && meta.latitude != null && meta.longitude != null);
+        card.dataset.hasGeo = hasGeo ? "1" : "0";
+
+        const thumbUrl = asset.asset_urls?.thumbnail?.url;
+        const thumb = document.createElement("div");
+        thumb.className = "thumb";
+        if (thumbUrl) {
+          const img = document.createElement("img");
+          img.loading = "lazy";
+          img.src = "/api/thumbnail?u=" + encodeURIComponent(thumbUrl);
+          img.alt = asset.original_file_name || asset.id;
+          img.onerror = () => {
+            thumb.textContent = "thumbnail failed";
+            img.remove();
+          };
+          thumb.appendChild(img);
+        } else {
+          thumb.textContent = "no thumbnail";
+        }
+        card.appendChild(thumb);
+
+        const body = document.createElement("div");
+        body.className = "body";
+
+        const metaLine = document.createElement("div");
+        metaLine.className = "meta-line";
+        const idEl = document.createElement("span");
+        idEl.className = "id";
+        idEl.textContent = asset.id.slice(0, 8) + "…";
+        idEl.title = "Click to copy " + asset.id;
+        idEl.onclick = () => navigator.clipboard?.writeText(asset.id);
+        const dt = document.createElement("span");
+        dt.textContent = asset.local_datetime
+          ? asset.local_datetime.replace("T", " ").slice(0, 19)
+          : "";
+        metaLine.appendChild(idEl);
+        metaLine.appendChild(dt);
+        body.appendChild(metaLine);
+
+        if (!meta) {
+          const p = document.createElement("div");
+          p.className = "no-meta";
+          p.textContent = "No metadata.";
+          body.appendChild(p);
+        } else {
+          const dl = document.createElement("dl");
+          for (const f of GEO_FIELDS) {
+            const dtEl = document.createElement("dt");
+            dtEl.textContent = f;
+            const ddEl = document.createElement("dd");
+            const v = fmt(meta[f]);
+            if (v === null) {
+              ddEl.textContent = "—";
+              ddEl.className = "null";
+            } else {
+              ddEl.textContent = v;
+            }
+            dl.appendChild(dtEl);
+            dl.appendChild(ddEl);
+          }
+          body.appendChild(dl);
+        }
+
+        card.appendChild(body);
+        return card;
+      }
+
+      function applyGeoFilter() {
+        const only = onlyGeo.checked;
+        let visible = 0;
+        for (const card of grid.children) {
+          const hide = only && card.dataset.hasGeo !== "1";
+          card.classList.toggle("hidden", hide);
+          if (!hide) visible++;
+        }
+        return visible;
+      }
+
+      function updateFooter(visible) {
+        const total = currentPage?.data?.length ?? 0;
+        const pageNum = cursors.length;
+        const hasMore = !!currentPage?.has_more;
+        const filterNote = onlyGeo.checked && visible !== total
+          ? ` · showing ${visible}/${total} (filtered)`
+          : "";
+        footerStatus.textContent =
+          `Page ${pageNum} · ${total} asset${total === 1 ? "" : "s"}${filterNote} · ` +
+          (hasMore ? "more available" : "end of list");
+      }
+
+      async function loadPage() {
+        status.textContent = "loading…";
+        setPrevDisabled(true);
+        setNextDisabled(true);
+        grid.innerHTML = "";
+
+        const after = cursors[cursors.length - 1];
+        const url = "/api/assets" + (after ? "?starting_after_id=" + encodeURIComponent(after) : "");
+        let res;
+        try {
+          res = await fetch(url);
+        } catch (e) {
+          status.textContent = "network error: " + e.message;
+          return;
+        }
+        if (!res.ok) {
+          const text = await res.text();
+          status.textContent = `error ${res.status}: ${text.slice(0, 200)}`;
+          return;
+        }
+        currentPage = await res.json();
+
+        for (const asset of currentPage.data) {
+          grid.appendChild(renderCard(asset));
+        }
+        const visible = applyGeoFilter();
+        setPrevDisabled(cursors.length <= 1);
+        setNextDisabled(!currentPage.has_more || currentPage.data.length === 0);
+        status.textContent = "";
+        updateFooter(visible);
+      }
+
+      const goPrev = () => {
+        if (cursors.length <= 1) return;
+        cursors.pop();
+        window.scrollTo({ top: 0 });
+        loadPage();
+      };
+      const goNext = () => {
+        if (!currentPage?.has_more) return;
+        const last = currentPage.data[currentPage.data.length - 1];
+        if (!last) return;
+        cursors.push(last.id);
+        window.scrollTo({ top: 0 });
+        loadPage();
+      };
+      prevBtns.forEach((b) => b.addEventListener("click", goPrev));
+      nextBtns.forEach((b) => b.addEventListener("click", goNext));
+
+      onlyGeo.addEventListener("change", () => {
+        const visible = applyGeoFilter();
+        updateFooter(visible);
+      });
+
+      loadPage();
+    </script>
+  </body>
+</html>
