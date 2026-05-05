@@ -8,6 +8,8 @@ sweep through the worst-fitting faces and reassign them.
 It's a single static HTML file. No build step, no server, no
 dependencies beyond a browser and a way to serve a directory locally.
 
+![Triage view — one face at a time, with current distance, candidate alternates, and per-face actions.](screenshots/triage_view.png)
+
 > ⚠️ **Mutates your library.** This demo's main job is to call
 > `PATCH /api/faces/{id}` to move faces between people (or detach them).
 > Every reassignment and detach is real and immediate. There is an Undo
@@ -38,6 +40,8 @@ In the page:
 4. **Person**: every named person in the library, biggest cluster first.
    Type in the filter to narrow down, then click a row to start
    triaging.
+
+![Person picker — every named person in the library, sorted by face count.](screenshots/person_selector_view.png)
 
 The credentials, library ID, and active subject persist in
 `localStorage`, so reload returns you to the same view.
