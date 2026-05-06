@@ -12,6 +12,7 @@ designed to be forked and adapted.
 | Demo | What it does |
 | --- | --- |
 | [`face-cleanup/`](face-cleanup/) | Browser-only triage UI for cleaning up a Person's face cluster — surfaces likely-misassigned faces and one-clicks them onto the right Person. |
+| [`geoviewer/`](geoviewer/) | Local web app to browse assets and inspect their geo metadata (lat/lon, city, country, place name, timezone, …) with a "only with coordinates" filter. |
 
 ## Get an API key
 
@@ -24,9 +25,9 @@ libraries you own.
 
 ## Running a demo
 
-Every demo here is a static page or a small script — no servers, no
-build step, no Gumnut credentials checked into the repo. See each demo's
-`README.md` for the exact commands.
+Each demo is either a static page or a small local script/server — kept
+small enough to read end-to-end, with no Gumnut credentials checked into
+the repo. See each demo's `README.md` for the exact commands.
 
 ## Contributing
 
