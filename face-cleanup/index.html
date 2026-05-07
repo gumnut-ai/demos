@@ -660,6 +660,8 @@ async function buildInverseFaces(snapshot, onProgress) {
     // sticks (no retry without re-picking the subject).
     try {
       while (true) {
+        // Pair with the outer for-loop's bail-out — covers a subject
+        // switch that lands mid-pagination on a single donor.
         if (state.snapshot !== snapshot) return inverseFaces;
         const page = await state.client.listFacesPage(donorId, snapshot.library_id, cursor);
         const rows = page.data || [];
