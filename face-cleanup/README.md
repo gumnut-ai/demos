@@ -42,7 +42,7 @@ In the page:
    first. Type in the filter to narrow named entries down by name; clear
    the filter to see unnamed clusters. Click a card to start triaging.
 
-![Person picker — every named person in the library, sorted by face count.](screenshots/person_selector_view.png)
+![Person picker — every person in the library (named and unnamed), as a thumbnail grid sorted by face count.](screenshots/person_selector_view.png)
 
 The credentials, library ID, and active subject persist in
 `localStorage`, so reload returns you to the same view.

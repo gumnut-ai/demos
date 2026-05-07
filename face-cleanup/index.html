@@ -643,47 +643,62 @@ async function buildInverseFaces(snapshot, onProgress) {
   const inverseFaces = [];
   const donorList = [...donorIds];
   for (let i = 0; i < donorList.length; i++) {
+    // Bail out as soon as the operator switches subjects — without this
+    // check the build keeps walking the abandoned snapshot's donors and
+    // burns Bearer-auth round-trips the user will never see.
+    if (state.snapshot !== snapshot) return inverseFaces;
     const donorId = donorList[i];
     if (onProgress) onProgress(i, donorList.length, inverseFaces.length);
     const donor = peopleById.get(donorId);
     const donorName = donor?.name ?? null;
     let cursor = null;
-    while (true) {
-      const page = await state.client.listFacesPage(donorId, snapshot.library_id, cursor);
-      const rows = page.data || [];
-      for (const f of rows) {
-        const cands = f.cluster_assignment?.candidates ?? [];
-        const subjCand = cands.find(c => c.person_id === snapshot.subject.id);
-        if (!subjCand || subjCand.distance == null) continue;
-        // Faces with no centroid on the donor come back with
-        // distance_to_person = null — treat as +Infinity so a positive
-        // d_subject still satisfies the "closer to subject" filter.
-        const d_current = f.cluster_assignment?.distance_to_person ?? Infinity;
-        if (subjCand.distance >= d_current) continue;
-        inverseFaces.push({
-          face_id: f.id,
-          asset_id: f.asset_id,
-          bbox: f.bounding_box,
-          d_current,                                          // distance to donor
-          d_subject: subjCand.distance,                       // distance to subject
-          candidates: [{
-            id: snapshot.subject.id,
-            name: snapshot.subject.name,
-            d: subjCand.distance,
-          }],
-          mode: 'inverse',
-          initial_person_id: donorId,
-          current_person_id: donorId,
-          current_person_name: donorName,
-          // Match the same flag shape as normal faces so existing
-          // tab/badge code doesn't have to special-case mode.
-          closer_to_other: false,
-          sibling_ambig: false,
-          within_distance_gate: false,
-        });
+    // A single transient failure on one donor shouldn't wipe the whole
+    // partial result — log it, skip that donor, keep walking. The
+    // outer ensureInverseFaces() also catches, but that catch is the
+    // last-resort: if buildInverseFaces itself throws partway, the
+    // already-accumulated hits are lost and the empty-array cache
+    // sticks (no retry without re-picking the subject).
+    try {
+      while (true) {
+        if (state.snapshot !== snapshot) return inverseFaces;
+        const page = await state.client.listFacesPage(donorId, snapshot.library_id, cursor);
+        const rows = page.data || [];
+        for (const f of rows) {
+          const cands = f.cluster_assignment?.candidates ?? [];
+          const subjCand = cands.find(c => c.person_id === snapshot.subject.id);
+          if (!subjCand || subjCand.distance == null) continue;
+          // Faces with no centroid on the donor come back with
+          // distance_to_person = null — treat as +Infinity so a positive
+          // d_subject still satisfies the "closer to subject" filter.
+          const d_current = f.cluster_assignment?.distance_to_person ?? Infinity;
+          if (subjCand.distance >= d_current) continue;
+          inverseFaces.push({
+            face_id: f.id,
+            asset_id: f.asset_id,
+            bbox: f.bounding_box,
+            d_current,                                          // distance to donor
+            d_subject: subjCand.distance,                       // distance to subject
+            candidates: [{
+              id: snapshot.subject.id,
+              name: snapshot.subject.name,
+              d: subjCand.distance,
+            }],
+            mode: 'inverse',
+            initial_person_id: donorId,
+            current_person_id: donorId,
+            current_person_name: donorName,
+            // Match the same flag shape as normal faces so existing
+            // tab/badge code doesn't have to special-case mode.
+            closer_to_other: false,
+            sibling_ambig: false,
+            within_distance_gate: false,
+          });
+        }
+        if (!page.has_more || !rows.length) break;
+        cursor = rows[rows.length - 1].id;
       }
-      if (!page.has_more || !rows.length) break;
-      cursor = rows[rows.length - 1].id;
+    } catch (e) {
+      console.warn(`Inverse build: skipping donor ${donorId}`, e);
     }
   }
   // Closest-to-subject first: highest-confidence "should be on subject"
@@ -947,7 +962,15 @@ async function ensureInverseFaces() {
 async function setFilter(filter) {
   state.filter = filter;
   localStorage.setItem(LS_KEY_FILTER, filter);
-  if (filter === 'inverse' && state.snapshot.inverseFaces == null && !state.snapshot.inverseLoading) {
+  if (filter === 'inverse' && state.snapshot.inverseFaces == null) {
+    if (state.snapshot.inverseLoading) {
+      // A second click while the build is in flight: refresh the active
+      // tab styling but leave the in-flight loading UI alone — falling
+      // through to applyFilter/render would briefly replace the loading
+      // card with "No faces match this filter." until the await resolves.
+      renderTabs();
+      return;
+    }
     await ensureInverseFaces();
     // Bail if the operator switched away from inverse while we were
     // loading — re-render the tabs so the new count is visible, but
@@ -1019,17 +1042,20 @@ async function render() {
   // destinations. For inverse-tab faces we identify the *current* donor
   // and show the subject as the only destination — the operator's job
   // is to confirm whether the face really belongs to the subject.
+  // d_current is +Infinity when the face has no centroid on its current
+  // Person (a centroidless cluster); show 'n/a' rather than "Infinity".
+  const dCurrentStr = isFinite(face.d_current) ? face.d_current.toFixed(3) : 'n/a';
   let metaCore;
   let candidatesHeader;
   if (face.mode === 'inverse') {
     const donorName = face.current_person_name ?? UNNAMED_LABEL;
     metaCore = `
-      <span><strong>currently:</strong> ${escapeHtml(donorName)} · d=${face.d_current.toFixed(3)}</span>
+      <span><strong>currently:</strong> ${escapeHtml(donorName)} · d=${dCurrentStr}</span>
       <span> · <strong>subject:</strong> ${escapeHtml(subjectName)} · d=${face.d_subject.toFixed(3)}</span>
     `;
     candidatesHeader = 'Reassign to subject';
   } else {
-    metaCore = `<span><strong>${escapeHtml(subjectName)}</strong> · d=${face.d_current.toFixed(3)}</span>`;
+    metaCore = `<span><strong>${escapeHtml(subjectName)}</strong> · d=${dCurrentStr}</span>`;
     candidatesHeader = 'Nearby candidates';
   }
 
