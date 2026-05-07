@@ -37,9 +37,10 @@ In the page:
 2. **API key**: paste your personal Gumnut API key. ([Get one](https://gumnut.ai).)
 3. **Library**: if your account has more than one library, pick one.
    Single-library accounts skip this step.
-4. **Person**: every named person in the library, biggest cluster first.
-   Type in the filter to narrow down, then click a row to start
-   triaging.
+4. **Person**: every person in the library — both **named** and
+   **unnamed** clusters — laid out in a thumbnail grid, biggest cluster
+   first. Type in the filter to narrow named entries down by name; clear
+   the filter to see unnamed clusters. Click a card to start triaging.
 
 ![Person picker — every named person in the library, sorted by face count.](screenshots/person_selector_view.png)
 
@@ -48,7 +49,10 @@ The credentials, library ID, and active subject persist in
 
 ## How to triage
 
-The header tabs filter the face list:
+The header tabs filter the face list. The first five tabs review faces
+that are **already on the subject** — looking for misassignments to
+reassign or detach. The last tab is the inverse: faces currently on
+*other* people that may belong to the subject.
 
 | Tab | Meaning |
 | --- | --- |
@@ -57,6 +61,7 @@ The header tabs filter the face list:
 | Any in-gate alt | Faces where some other Person is within the production assignment distance gate (0.35). The biggest "could-have-gone-elsewhere" pool. |
 | Worst outliers | Faces with `d_current` ≥ `outlier_distance` (0.45), sorted descending. Surfaces faces far from the subject's centroid even when no competing centroid is nearby — typically wrong-identity faces with no clear alternate destination. |
 | All | All faces, worst-first. |
+| Could be on subject | The inverse view: faces currently assigned to **other** Persons whose nearest-candidate list contains the subject AND where the subject is closer than the face's current Person. Shows up as "currently: \<other name\>" with a single "Reassign to subject" candidate button. Lazy-loaded the first time you open the tab — fans out to every neighboring Person, so it's slower than the other tabs on first click. |
 
 ### Per-face actions
 
@@ -85,12 +90,15 @@ subject Person it calls:
 
 - `GET /api/people/{id}?include=cluster_metrics` — header (name, p90,
   face count).
-- `GET /api/people?library_id=…&include=cluster_metrics&name_filter=named`
-  — candidate-thumbnail prefetch and per-candidate "cluster loose"
-  badges.
+- `GET /api/people?library_id=…&include=cluster_metrics&name_filter=all`
+  — picker grid (named + unnamed), candidate-thumbnail prefetch, and
+  per-candidate "cluster loose" badges.
 - `GET /api/faces?person_id=…&library_id=…&include=cluster_assignment`
   (paginated) — every face on the subject, with `distance_to_person`
-  and the top-K nearest other Persons in the same response.
+  and the top-K nearest other Persons in the same response. The
+  **Could be on subject** tab fans the same call out across every
+  neighboring Person, then keeps faces whose candidate list contains
+  the subject closer than their current Person.
 - `GET /api/faces/{id}` and `GET /api/assets?ids=…` — face-crop and
   parent-asset thumbnails plus the bbox overlay (lazy + prefetched).
 - `PATCH /api/faces/{id}` — reassignments and detaches.
@@ -98,9 +106,11 @@ subject Person it calls:
 Per-face flags (`closer_to_other`, `sibling_ambig`,
 `within_distance_gate`) are derived in the browser from the closest
 *named* candidate's distance. `cluster_assignment.candidates` includes
-unnamed clusters too, but unnamed clusters can't serve as a triage
-target (no name to render on the candidate button), so they're filtered
-out before flag computation.
+unnamed clusters too, but unnamed clusters can't serve as a candidate
+*destination* (no name to render on the button), so they're filtered
+out before flag computation. The subject itself **can** be unnamed —
+the picker lists both — and the standard tabs work the same against
+unnamed subjects, just with `(unnamed)` in the header.
 
 ## Tuning
 

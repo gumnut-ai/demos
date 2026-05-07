@@ -66,24 +66,44 @@
   .config-panel .row select { flex: 1; }
   .config-panel h2 { margin: 0 0 12px; font-size: 14px; font-weight: 600; }
 
-  /* Person picker — scrollable list of named persons in the chosen
-     library, sorted by face_count desc, with an inline substring filter. */
-  .person-list {
-    max-height: 320px; overflow-y: auto;
+  /* Person picker — grid of every person in the chosen library (named +
+     unnamed), with a square thumbnail per card, sorted by face_count
+     desc, with an inline substring filter on the name. */
+  .person-grid {
+    max-height: 480px; overflow-y: auto;
     border: 1px solid var(--border); border-radius: 6px;
     background: var(--panel-2);
+    padding: 10px;
+    display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+    gap: 10px;
   }
-  .person-row {
-    display: flex; gap: 10px; align-items: center;
-    padding: 8px 10px; cursor: pointer;
-    border-bottom: 1px solid var(--border);
+  .person-card {
+    display: flex; flex-direction: column; gap: 6px;
+    padding: 8px; cursor: pointer;
+    background: var(--panel); color: var(--text);
+    border: 1px solid var(--border); border-radius: 8px;
+    text-align: left; min-width: 0; font: inherit;
   }
-  .person-row:last-child { border-bottom: none; }
-  .person-row:hover { background: var(--panel); }
-  .person-row .name { font-weight: 600; flex: 1; min-width: 0;
+  .person-card:hover { border-color: var(--accent); }
+  .person-card.unnamed .name { color: var(--muted); font-style: italic; }
+  .person-card-thumb {
+    width: 100%; aspect-ratio: 1;
+    background: #000; border-radius: 6px; overflow: hidden;
+    display: flex; align-items: center; justify-content: center;
+    color: var(--muted); font-size: 22px;
+  }
+  .person-card-thumb img { width: 100%; height: 100%; object-fit: cover; }
+  .person-card .name {
+    font-weight: 600; font-size: 13px;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .person-card .name .id-suffix {
+    color: var(--muted); font-weight: 400; font-style: normal; font-size: 11px;
+    margin-left: 4px;
+  }
+  .person-card .meta { color: var(--muted); font-size: 11px;
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .person-row .meta { color: var(--muted); font-size: 12px; }
-  .person-list-empty { padding: 12px; color: var(--muted); font-size: 13px; }
+  .person-list-empty { padding: 12px; color: var(--muted); font-size: 13px; grid-column: 1 / -1; }
 
   .progress {
     display: flex; gap: 16px; align-items: center; color: var(--muted);
@@ -263,7 +283,7 @@
       <label for="person-filter">Filter</label>
       <input type="text" id="person-filter" placeholder="type to filter…" autocomplete="off" />
     </div>
-    <div class="person-list" id="person-list"></div>
+    <div class="person-grid" id="person-list"></div>
     <p class="hint">
       <span id="person-hint"></span>
       <a href="#" id="switch-library" hidden>Switch library</a>
@@ -428,18 +448,18 @@ class Client {
   listLibraries() {
     return this._req('GET', '/api/libraries');
   }
-  // All named persons in the library, with cluster_metrics for the
-  // candidate-thumbnail prefetch and the "cluster loose" badge. Walks the
-  // pagination cursor to completion — typical libraries have <200 named
-  // persons so usually one round-trip.
-  async listAllNamedPeople(libraryId) {
+  // Every person in the library (named + unnamed), with cluster_metrics
+  // for the candidate-thumbnail prefetch and the "cluster loose" badge.
+  // Walks the pagination cursor to completion — typical libraries have
+  // a few hundred persons total so usually one round-trip.
+  async listAllPeople(libraryId) {
     const out = [];
     let cursor = null;
     while (true) {
       const qs = new URLSearchParams();
       qs.set('library_id', libraryId);
       qs.set('include', 'cluster_metrics');
-      qs.set('name_filter', 'named');
+      qs.set('name_filter', 'all');
       qs.set('limit', '200');
       if (cursor) qs.set('starting_after_id', cursor);
       const page = await this._req('GET', `/api/people?${qs}`);
@@ -461,7 +481,7 @@ const state = {
   libraries: [],      // populated after creds are saved
   libraryId: null,
   personId: null,
-  peoplePicker: [],   // named persons in selected library, sorted by face_count desc
+  peoplePicker: [],   // every person (named + unnamed) in selected library, sorted by face_count desc
   faces: [],          // current filtered list
   filter: 'closer',
   index: 0,
@@ -479,37 +499,50 @@ const state = {
   lastAssigned: new Map(),
 };
 
+// Default name to render when a Person has no name set — same string in
+// the picker, the subject header, and the inverse-tab "currently on:"
+// label so the operator sees consistent copy.
+const UNNAMED_LABEL = '(unnamed)';
+
 // ---------- snapshot building ----------
 // Live fan-out against the public API — no server-side build step:
 //
 // * Subject Person — for the header (name, pairwise_p90, face_count).
-// * All named Persons in the library — for candidate thumbnails and
-//   per-candidate "cluster loose" badges.
+// * Every Person in the library (named + unnamed) — for candidate
+//   thumbnails, per-candidate "cluster loose" badges, and the inverse-
+//   tab donor lookup.
 // * Every Face on the subject Person — paginated, with
 //   include=cluster_assignment so each row already carries
 //   distance_to_person and the top-K candidate Persons with distances.
 //
 // The three per-face flags (closer_to_other / sibling_ambig /
 // within_distance_gate) are derived client-side from the closest *named*
-// candidate's distance — matching the original snapshot SQL's
-// `WHERE name IS NOT NULL` filter on candidates. Unnamed clusters can't
-// be a triage target (the dashboard renders candidate names), so they're
-// dropped before the flags are computed.
+// candidate's distance. Unnamed clusters are dropped from the candidate
+// list before flag computation: the candidate buttons render the
+// destination's name, so an unnamed candidate has nothing meaningful to
+// label. (The subject itself can be unnamed — the picker now lists both
+// named and unnamed clusters — but the *destinations* stay named-only.)
 async function buildSnapshot(libraryId, personId, peopleAll, onProgress) {
   // Subject + first faces page don't depend on each other, so run them
-  // concurrently with the named-people list (when we have to fetch it).
+  // concurrently with the people list (when we have to fetch it).
   // ``peopleAll`` is passed in by callers that already loaded the list
   // (the common case — the user just used the picker); we only paginate
   // it again when re-entering cold (e.g., reload landing on a saved
   // person id with no picker pass).
   const peoplePromise = peopleAll
     ? Promise.resolve(peopleAll)
-    : state.client.listAllNamedPeople(libraryId);
+    : state.client.listAllPeople(libraryId);
   const [subject, people, firstFaces] = await Promise.all([
     state.client.getPersonWithMetrics(personId),
     peoplePromise,
     state.client.listFacesPage(personId, libraryId, null),
   ]);
+  // Stash the subject in the person cache so the inverse tab's
+  // "Reassign to subject" candidate button picks up its thumbnail
+  // without firing another getPerson round-trip — the subject doesn't
+  // appear in any of its own faces' candidate lists, so
+  // prefetchPersonThumbs would otherwise miss it.
+  state.personCache.set(subject.id, subject);
   const allFaces = [...(firstFaces.data || [])];
   if (onProgress) onProgress(allFaces.length);
   let cursor = firstFaces.has_more && allFaces.length
@@ -523,9 +556,9 @@ async function buildSnapshot(libraryId, personId, peopleAll, onProgress) {
   }
 
   const faces = allFaces.map(f => {
-    // Match the original SQL's `WHERE name IS NOT NULL` constraint:
-    // unnamed clusters render as "null" candidate buttons and aren't a
-    // useful triage target (the operator can Detach instead).
+    // Drop unnamed candidates — they render as "null"-named buttons and
+    // aren't a useful triage destination (the operator can Detach
+    // instead, which sends the face back to clustering).
     const namedCands = (f.cluster_assignment?.candidates ?? [])
       .filter(c => c.name);
     const cands = namedCands.map(c => ({
@@ -545,11 +578,24 @@ async function buildSnapshot(libraryId, personId, peopleAll, onProgress) {
       closer_to_other:      top !== null && top.d < d_current,
       sibling_ambig:        top !== null && Math.abs(top.d - d_current) < SIBLING_MARGIN,
       within_distance_gate: top !== null && top.d < DISTANCE_GATE,
+      // Distinguishes faces in the standard tabs (currently assigned to
+      // the subject) from faces in the inverse tab (currently on a
+      // donor). The render path uses ``mode`` to pick meta-line copy and
+      // ``initial_person_id`` to seed currentPersonId() before any
+      // PATCH — so Undo of an inverse-tab move puts the face back on
+      // the donor, not on the subject.
+      mode: 'normal',
+      initial_person_id: subject.id,
     };
   });
-  // Match the snapshot SQL's ORDER BY d_subject DESC: worst-fit first
-  // when no other filter is active.
+  // Worst-fit first when no other filter is active.
   faces.sort((a, b) => b.d_current - a.d_current);
+
+  // O(1) lookup so currentPersonId() can resolve a face's pre-action
+  // owner without scanning state.faces (which only holds the active
+  // filter's slice).
+  const facesById = new Map();
+  for (const f of faces) facesById.set(f.face_id, f);
 
   return {
     library_id: libraryId,
@@ -566,19 +612,105 @@ async function buildSnapshot(libraryId, personId, peopleAll, onProgress) {
       face_count: p.cluster_metrics?.face_count ?? null,
     })),
     faces,
+    facesById,
+    // Lazily populated — see ensureInverseFaces(). Loading the inverse
+    // list paginates faces for every neighbor person, which is expensive
+    // for big libraries; we only pay it when the operator opens the tab.
+    inverseFaces: null,
+    inverseLoading: false,
   };
 }
 
-function applyFilter(filter) {
-  const all = state.snapshot.faces;
-  let list = all;
-  if (filter === 'closer')      list = all.filter(f => f.closer_to_other);
-  else if (filter === 'ambig')  list = all.filter(f => f.sibling_ambig);
-  else if (filter === 'gate')   list = all.filter(f => f.within_distance_gate);
-  else if (filter === 'outliers') {
-    list = all.filter(f => f.d_current >= OUTLIER_DISTANCE).sort((a, b) => b.d_current - a.d_current);
+// Build the inverse-tab face list: faces currently assigned to *other*
+// named Persons whose nearest-candidate list contains the subject AND
+// where the subject is closer than the face's current Person.
+//
+// Donor candidates are limited to Persons that already appear as
+// candidates on at least one of the subject's own faces — i.e., the
+// neighbor set. That bounds the fan-out: a polluted cluster typically
+// has a couple dozen distinct candidate Persons across all its faces,
+// not the entire library. Still potentially heavy on large libraries,
+// which is why we lazy-load on first tab click.
+async function buildInverseFaces(snapshot, onProgress) {
+  const donorIds = new Set();
+  for (const f of snapshot.faces) {
+    for (const c of f.candidates) donorIds.add(c.id);
   }
-  else if (filter === 'all')    list = [...all].sort((a, b) => b.d_current - a.d_current);
+  donorIds.delete(snapshot.subject.id); // never list the subject itself
+  const peopleById = new Map();
+  for (const p of snapshot.people) peopleById.set(p.id, p);
+
+  const inverseFaces = [];
+  const donorList = [...donorIds];
+  for (let i = 0; i < donorList.length; i++) {
+    const donorId = donorList[i];
+    if (onProgress) onProgress(i, donorList.length, inverseFaces.length);
+    const donor = peopleById.get(donorId);
+    const donorName = donor?.name ?? null;
+    let cursor = null;
+    while (true) {
+      const page = await state.client.listFacesPage(donorId, snapshot.library_id, cursor);
+      const rows = page.data || [];
+      for (const f of rows) {
+        const cands = f.cluster_assignment?.candidates ?? [];
+        const subjCand = cands.find(c => c.person_id === snapshot.subject.id);
+        if (!subjCand || subjCand.distance == null) continue;
+        // Faces with no centroid on the donor come back with
+        // distance_to_person = null — treat as +Infinity so a positive
+        // d_subject still satisfies the "closer to subject" filter.
+        const d_current = f.cluster_assignment?.distance_to_person ?? Infinity;
+        if (subjCand.distance >= d_current) continue;
+        inverseFaces.push({
+          face_id: f.id,
+          asset_id: f.asset_id,
+          bbox: f.bounding_box,
+          d_current,                                          // distance to donor
+          d_subject: subjCand.distance,                       // distance to subject
+          candidates: [{
+            id: snapshot.subject.id,
+            name: snapshot.subject.name,
+            d: subjCand.distance,
+          }],
+          mode: 'inverse',
+          initial_person_id: donorId,
+          current_person_id: donorId,
+          current_person_name: donorName,
+          // Match the same flag shape as normal faces so existing
+          // tab/badge code doesn't have to special-case mode.
+          closer_to_other: false,
+          sibling_ambig: false,
+          within_distance_gate: false,
+        });
+      }
+      if (!page.has_more || !rows.length) break;
+      cursor = rows[rows.length - 1].id;
+    }
+  }
+  // Closest-to-subject first: highest-confidence "should be on subject"
+  // candidates lead the queue.
+  inverseFaces.sort((a, b) => a.d_subject - b.d_subject);
+  if (onProgress) onProgress(donorList.length, donorList.length, inverseFaces.length);
+  return inverseFaces;
+}
+
+function applyFilter(filter) {
+  let list;
+  if (filter === 'inverse') {
+    // Lazily computed; see ensureInverseFaces(). Until the first load
+    // resolves we render an empty list (the loading-state UI is owned
+    // by render(), driven by ``snapshot.inverseLoading``).
+    list = state.snapshot.inverseFaces ?? [];
+  } else {
+    const all = state.snapshot.faces;
+    if (filter === 'closer')      list = all.filter(f => f.closer_to_other);
+    else if (filter === 'ambig')  list = all.filter(f => f.sibling_ambig);
+    else if (filter === 'gate')   list = all.filter(f => f.within_distance_gate);
+    else if (filter === 'outliers') {
+      list = all.filter(f => f.d_current >= OUTLIER_DISTANCE).sort((a, b) => b.d_current - a.d_current);
+    }
+    else if (filter === 'all')    list = [...all].sort((a, b) => b.d_current - a.d_current);
+    else                          list = all;
+  }
   state.faces = list;
   state.index = 0;
   // Skip past already-reviewed faces
@@ -755,12 +887,21 @@ function renderTabs() {
     outliers: state.snapshot.faces.filter(f => f.d_current >= OUTLIER_DISTANCE).length,
     all:      state.snapshot.faces.length,
   };
+  // Inverse tab count is unknown until the operator opens the tab and
+  // we paginate through the donors. Render '?' until the first build,
+  // 'loading…' while in flight, and the final count afterwards.
+  let inverseLabel;
+  if (state.snapshot.inverseLoading)         inverseLabel = 'Could be on subject (loading…)';
+  else if (state.snapshot.inverseFaces != null) inverseLabel = `Could be on subject (${state.snapshot.inverseFaces.length})`;
+  else                                        inverseLabel = 'Could be on subject (?)';
+
   const defs = [
     ['closer',   `Closer to another (${counts.closer})`],
     ['ambig',    `Sibling-ambiguous (${counts.ambig})`],
     ['gate',     `Any in-gate alt (${counts.gate})`],
     ['outliers', `Worst outliers (${counts.outliers})`],
     ['all',      `All (${counts.all})`],
+    ['inverse',  inverseLabel],
   ];
   tabs.innerHTML = '';
   for (const [key, label] of defs) {
@@ -772,9 +913,50 @@ function renderTabs() {
   }
 }
 
-function setFilter(filter) {
+// Triggered the first time the operator opens the inverse tab. Walks
+// every donor's face list and merges hits into snapshot.inverseFaces,
+// updating tab + face-card UI as progress comes in. Subsequent opens
+// hit the cached list.
+async function ensureInverseFaces() {
+  const snap = state.snapshot;
+  if (snap.inverseFaces != null || snap.inverseLoading) return;
+  snap.inverseLoading = true;
+  renderTabs();
+  // Replace the face card with a progress message — the operator should
+  // see something happening even before the first donor's faces arrive.
+  faceHost.innerHTML = `<div class="card" id="inverse-loading">Loading inverse-assignment list…</div>`;
+  progress.innerHTML = '';
+  try {
+    snap.inverseFaces = await buildInverseFaces(snap, (cur, total, found) => {
+      if (state.filter !== 'inverse') return;
+      const el = document.getElementById('inverse-loading');
+      if (el) {
+        el.textContent = `Loading inverse-assignment list… ${cur}/${total} donors checked · ${found} candidate face${found === 1 ? '' : 's'} found`;
+      }
+    });
+    for (const f of snap.inverseFaces) snap.facesById.set(f.face_id, f);
+  } catch (e) {
+    toast(`Failed to load inverse-assignment list: ${e.message}`, 'error', 6000);
+    console.error(e);
+    snap.inverseFaces = [];
+  } finally {
+    snap.inverseLoading = false;
+  }
+}
+
+async function setFilter(filter) {
   state.filter = filter;
   localStorage.setItem(LS_KEY_FILTER, filter);
+  if (filter === 'inverse' && state.snapshot.inverseFaces == null && !state.snapshot.inverseLoading) {
+    await ensureInverseFaces();
+    // Bail if the operator switched away from inverse while we were
+    // loading — re-render the tabs so the new count is visible, but
+    // don't clobber the active filter's view.
+    if (state.filter !== 'inverse') {
+      renderTabs();
+      return;
+    }
+  }
   applyFilter(filter);
   renderTabs();
   render();
@@ -798,6 +980,9 @@ function countByAction(action) {
 }
 
 function badgeFor(face) {
+  if (face.mode === 'inverse') {
+    return `<span class="badge warn">could be subject</span>`;
+  }
   const out = [];
   if (face.closer_to_other) out.push(`<span class="badge bad">closer-to-other</span>`);
   if (face.sibling_ambig)   out.push(`<span class="badge warn">sibling-ambig</span>`);
@@ -825,8 +1010,28 @@ async function render() {
   renderProgress();
 
   const subject = state.snapshot.subject;
+  const subjectName = subject.name ?? UNNAMED_LABEL;
   const reviewedTag = state.reviewed[face.face_id]
     ? `<span class="badge good">${state.reviewed[face.face_id]}</span>` : '';
+
+  // The meta line and candidates-section header are mode-aware. For
+  // normal-tab faces we identify the subject and show alternate
+  // destinations. For inverse-tab faces we identify the *current* donor
+  // and show the subject as the only destination — the operator's job
+  // is to confirm whether the face really belongs to the subject.
+  let metaCore;
+  let candidatesHeader;
+  if (face.mode === 'inverse') {
+    const donorName = face.current_person_name ?? UNNAMED_LABEL;
+    metaCore = `
+      <span><strong>currently:</strong> ${escapeHtml(donorName)} · d=${face.d_current.toFixed(3)}</span>
+      <span> · <strong>subject:</strong> ${escapeHtml(subjectName)} · d=${face.d_subject.toFixed(3)}</span>
+    `;
+    candidatesHeader = 'Reassign to subject';
+  } else {
+    metaCore = `<span><strong>${escapeHtml(subjectName)}</strong> · d=${face.d_current.toFixed(3)}</span>`;
+    candidatesHeader = 'Nearby candidates';
+  }
 
   // Render skeleton first; populate thumbnails async
   faceHost.innerHTML = `
@@ -834,7 +1039,7 @@ async function render() {
       <div class="face-meta">
         ${reviewedTag}
         ${badgeFor(face)}
-        <span><strong>${escapeHtml(subject.name)}</strong> · d=${face.d_current.toFixed(3)}</span>
+        ${metaCore}
         <span> · face <code>${face.face_id}</code></span>
         <span> · <a id="asset-link" target="_blank" rel="noopener">open asset ↗</a></span>
       </div>
@@ -843,7 +1048,7 @@ async function render() {
         <div class="asset-img-wrap empty" id="asset-img-wrap">loading…</div>
       </div>
       <div class="candidates-section">
-        <h3 class="candidates-header">Nearby faces</h3>
+        <h3 class="candidates-header">${candidatesHeader}</h3>
         <div class="candidates" id="candidates"></div>
       </div>
     </div>
@@ -939,7 +1144,7 @@ async function render() {
       btn.innerHTML = `
         <div class="candidate-thumb">${thumbUrl ? `<img src="${thumbUrl}" alt="" />` : '?'}</div>
         <div class="candidate-meta">
-          <div class="candidate-name">${escapeHtml(c.name)}</div>
+          <div class="candidate-name">${escapeHtml(c.name ?? UNNAMED_LABEL)}</div>
           <div class="candidate-dist">d=${c.d.toFixed(3)} ${inGate ? '✓ in gate' : '· out of gate'}${cohesionWarn}</div>
         </div>
         <kbd>${i + 1}</kbd>
@@ -1020,11 +1225,15 @@ function lightboxOpen() { return lightboxEl !== null; }
 // ---------- actions ----------
 // Read the face's current person_id for Undo. Prefer state.lastAssigned
 // (anything we've PATCHed this session) so a re-reassigned face Undoes
-// to the *previous* assignee, not the snapshot subject. Falls back to
-// the snapshot subject — the SQL filter (`person_id = subject.id`)
-// guarantees that's the right starting state for any first-time action.
+// to the *previous* assignee. Otherwise fall back to the face's
+// initial owner — subject.id for normal-tab faces, donor id for
+// inverse-tab faces. Final fallback is the subject for legacy faces
+// that predate the facesById map (shouldn't happen now, but keeps the
+// function defined for any face id passed in).
 function currentPersonId(faceId) {
   if (state.lastAssigned.has(faceId)) return state.lastAssigned.get(faceId);
+  const face = state.snapshot.facesById.get(faceId);
+  if (face && face.initial_person_id !== undefined) return face.initial_person_id;
   return state.snapshot.subject.id;
 }
 
@@ -1352,7 +1561,7 @@ async function loadAndRenderPersonPicker() {
   const hint = document.getElementById('person-hint');
   hint.textContent = 'loading people…';
   try {
-    const people = await state.client.listAllNamedPeople(state.libraryId);
+    const people = await state.client.listAllPeople(state.libraryId);
     // cluster_metrics is null on empty Persons (no faces yet, no centroid).
     // Push them to the bottom so the more-cleanup-needed clusters float
     // to the top.
@@ -1366,9 +1575,11 @@ async function loadAndRenderPersonPicker() {
     state.peoplePicker = [];
     return;
   }
+  const namedCount = state.peoplePicker.filter(p => p.name).length;
+  const unnamedCount = state.peoplePicker.length - namedCount;
   hint.textContent = state.peoplePicker.length
-    ? `${state.peoplePicker.length} named person${state.peoplePicker.length === 1 ? '' : 's'} · `
-    : 'no named people in this library · ';
+    ? `${namedCount} named · ${unnamedCount} unnamed · `
+    : 'no people in this library · ';
   // Only show "Switch library" if there's actually somewhere to switch to.
   document.getElementById('switch-library').hidden = state.libraries.length <= 1;
   document.getElementById('person-filter').value = '';
@@ -1378,6 +1589,10 @@ async function loadAndRenderPersonPicker() {
 function renderPersonList() {
   const host = document.getElementById('person-list');
   const filter = document.getElementById('person-filter').value.trim().toLowerCase();
+  // Filter matches name when the operator types something. Unnamed
+  // clusters don't have a name to match against — they're always shown
+  // when the filter is empty and hidden when the filter has text. The
+  // operator can still pick an unnamed cluster by clearing the filter.
   const matches = filter
     ? state.peoplePicker.filter(p => (p.name || '').toLowerCase().includes(filter))
     : state.peoplePicker;
@@ -1387,18 +1602,31 @@ function renderPersonList() {
     return;
   }
   for (const p of matches) {
-    const row = document.createElement('div');
-    row.className = 'person-row';
+    const card = document.createElement('button');
+    card.type = 'button';
+    card.className = 'person-card' + (p.name ? '' : ' unnamed');
     const fc = p.cluster_metrics?.face_count;
     const p90 = p.cluster_metrics?.pairwise_p90;
-    const fcStr = fc != null ? `${fc} faces` : 'no metrics';
-    const p90Str = p90 != null ? `p90=${p90.toFixed(3)}` : '';
-    row.innerHTML = `
-      <span class="name">${escapeHtml(p.name || '(unnamed)')}</span>
-      <span class="meta">${fcStr}${p90Str ? ' · ' + p90Str : ''}</span>
+    const fcStr = fc != null ? `${fc} ${fc === 1 ? 'face' : 'faces'}` : 'no metrics';
+    const p90Str = p90 != null ? ` · p90=${p90.toFixed(3)}` : '';
+    const thumbUrl = p.asset_urls?.thumbnail?.url;
+    // For unnamed clusters, append a short id suffix so the operator can
+    // tell similar-looking thumbnails apart at a glance.
+    const idSuffix = p.name
+      ? ''
+      : ` <span class="id-suffix">${escapeHtml(p.id.slice(-6))}</span>`;
+    const nameHtml = p.name
+      ? escapeHtml(p.name)
+      : escapeHtml(UNNAMED_LABEL);
+    card.innerHTML = `
+      <div class="person-card-thumb">${thumbUrl
+        ? `<img src="${thumbUrl}" alt="" loading="lazy" />`
+        : (p.name ? '👤' : '?')}</div>
+      <div class="name">${nameHtml}${idSuffix}</div>
+      <div class="meta">${fcStr}${p90Str}</div>
     `;
-    row.onclick = () => onPickPerson(p.id);
-    host.appendChild(row);
+    card.onclick = () => onPickPerson(p.id);
+    host.appendChild(card);
   }
 }
 
@@ -1447,13 +1675,22 @@ async function launchCleanup() {
   const subj = state.snapshot.subject;
   // The subject's cluster_metrics block is null for an empty Person (no
   // centroid yet) — pairwise_p90 / face_count default to null in that
-  // case. Render 'n/a' / '?' rather than crashing.
+  // case. Render 'n/a' / '?' rather than crashing. The subject's name
+  // can also be null (the picker now lists unnamed clusters too) — show
+  // the placeholder label so the header doesn't read "null · …".
   const p90Str = subj.pairwise_p90 != null ? subj.pairwise_p90.toFixed(3) : 'n/a';
   const faceCountStr = subj.face_count != null ? subj.face_count : '?';
-  subjectLabel.textContent = `${subj.name} · p90=${p90Str} · ${faceCountStr} faces`;
+  const subjName = subj.name ?? UNNAMED_LABEL;
+  subjectLabel.textContent = `${subjName} · p90=${p90Str} · ${faceCountStr} faces`;
 
   hideAllPanels();
   content.hidden = false;
+  // If the operator left the page on the inverse tab, kick off the
+  // lazy build so they don't land on an empty "No faces match this
+  // filter" view. Same path setFilter() takes for an explicit click.
+  if (state.filter === 'inverse') {
+    await ensureInverseFaces();
+  }
   applyFilter(state.filter);
   renderTabs();
   render();
