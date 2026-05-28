@@ -760,6 +760,23 @@ async function buildUnassignedFaces(snapshot, onProgress) {
         const cands = f.cluster_assignment?.candidates ?? [];
         const subjCand = cands.find(c => c.person_id === subjectId);
         if (!subjCand || subjCand.distance == null) continue;
+        // Offer every named person close to this face as a destination —
+        // not just the subject — so the operator can send the face to
+        // whichever identity fits best, the same way the normal tabs do.
+        // Drop unnamed clusters (no label to render on the button), then
+        // make sure the subject is present even when it's unnamed (it
+        // drove this face into the tab), and sort closest-first.
+        const destinations = cands
+          .filter(c => c.name && c.distance != null)
+          .map(c => ({ id: c.person_id, name: c.name, d: c.distance }));
+        if (!destinations.some(d => d.id === subjectId)) {
+          destinations.push({
+            id: subjectId,
+            name: snapshot.subject.name,
+            d: subjCand.distance,
+          });
+        }
+        destinations.sort((a, b) => a.d - b.d);
         unassignedFaces.push({
           face_id: f.id,
           asset_id: f.asset_id,
@@ -769,11 +786,7 @@ async function buildUnassignedFaces(snapshot, onProgress) {
           // as centroidless clusters in the normal tabs).
           d_current: Infinity,
           d_subject: subjCand.distance,
-          candidates: [{
-            id: subjectId,
-            name: snapshot.subject.name,
-            d: subjCand.distance,
-          }],
+          candidates: destinations,
           mode: 'unassigned',
           // ``initial_person_id`` seeds currentPersonId() before any
           // PATCH; null mirrors the face's pre-action owner so Undo of
@@ -966,6 +979,29 @@ async function prefetchPersonThumbs() {
       console.warn('Failed to load person', id, e);
     }
   }));
+}
+
+// Fetch one Person into the cache on demand, deduping concurrent and
+// repeat requests. Used by the candidates render path to lazily warm
+// thumbnails for whichever face is on screen — the "Unassigned
+// candidates" tab surfaces destinations across a broad neighborhood
+// that the up-front prefetch (scoped to the subject's own faces) never
+// touched, and walking all of them eagerly would fan out a getPerson
+// per distinct neighbor. Lazy-by-visible-face keeps that cost
+// proportional to faces actually reviewed.
+const personFetchInFlight = new Map();
+function ensurePerson(personId) {
+  if (state.personCache.has(personId)) {
+    return Promise.resolve(state.personCache.get(personId));
+  }
+  if (personFetchInFlight.has(personId)) {
+    return personFetchInFlight.get(personId);
+  }
+  const p = state.client.getPerson(personId)
+    .then(person => { state.personCache.set(personId, person); return person; })
+    .finally(() => personFetchInFlight.delete(personId));
+  personFetchInFlight.set(personId, p);
+  return p;
 }
 
 // ---------- rendering ----------
@@ -1240,7 +1276,10 @@ async function render() {
       <span><strong>currently:</strong> unassigned · d=${dCurrentStr}</span>
       <span> · <strong>subject:</strong> ${escapeHtml(subjectName)} · d=${face.d_subject.toFixed(3)}</span>
     `;
-    candidatesHeader = 'Assign to subject';
+    // The face is unassigned and we offer every nearby named person as a
+    // destination (subject included), so the header matches the normal
+    // tabs rather than singling out the subject.
+    candidatesHeader = 'Assign to a nearby person';
   } else {
     metaCore = `<span><strong>${escapeHtml(subjectName)}</strong> · d=${dCurrentStr}</span>`;
     candidatesHeader = 'Nearby candidates';
@@ -1364,6 +1403,22 @@ async function render() {
       `;
       btn.onclick = () => assignTo(c.id);
       candHost.appendChild(btn);
+      // Lazily warm this candidate's thumbnail when it isn't cached yet
+      // (common in the "Unassigned candidates" tab, whose destinations
+      // span people the up-front prefetch never covered). Scoped to the
+      // visible face via stillCurrent() and re-checks the button is the
+      // same one — a fast Next/Prev recycles these element ids.
+      if (!thumbUrl) {
+        ensurePerson(c.id).then(person => {
+          if (!stillCurrent()) return;
+          const url = person?.asset_urls?.thumbnail?.url;
+          if (!url) return;
+          const thumb = btn.querySelector('.candidate-thumb');
+          if (thumb && btn.dataset.personId === c.id) {
+            thumb.innerHTML = `<img src="${url}" alt="" />`;
+          }
+        }).catch(e => console.warn('Candidate thumb load failed', c.id, e));
+      }
     });
   }
 }
