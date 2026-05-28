@@ -806,6 +806,14 @@ async function buildUnassignedFaces(snapshot, onProgress) {
     }
   } catch (e) {
     console.warn('Unassigned build: stopping early after error', e);
+    // The walk aborted mid-library: a page fetch failed, and cursor
+    // pagination can't resume without that page's cursor. We still
+    // return the partial list — losing the whole tail on a transient
+    // error would be worse, matching the inverse build's deliberate
+    // "don't wipe the partial result" choice above — but the operator
+    // has to know the count is a floor, not the total, or they'll trust
+    // a silently-truncated list and think they've reviewed everything.
+    toast('Unassigned list may be incomplete — an error interrupted the library walk. Re-pick the subject to rebuild.', 'error', 6000);
   }
   // Closest-to-subject first: best "should belong to subject" leads.
   unassignedFaces.sort((a, b) => a.d_subject - b.d_subject);
@@ -970,15 +978,13 @@ async function prefetchPersonThumbs() {
   for (const f of state.snapshot.faces) {
     for (const c of f.candidates) ids.add(c.id);
   }
-  await Promise.all([...ids].map(async id => {
-    if (state.personCache.has(id)) return;
-    try {
-      const p = await state.client.getPerson(id);
-      state.personCache.set(id, p);
-    } catch (e) {
-      console.warn('Failed to load person', id, e);
-    }
-  }));
+  // Delegate to ensurePerson so there's a single "fetch a Person into
+  // the cache" path (and we inherit its in-flight dedup for free). Keep
+  // the swallow-and-continue at this call site: one Person failing to
+  // load shouldn't abort warming the rest of the candidates.
+  await Promise.all([...ids].map(id =>
+    ensurePerson(id).catch(e => console.warn('Failed to load person', id, e))
+  ));
 }
 
 // Fetch one Person into the cache on demand, deduping concurrent and
