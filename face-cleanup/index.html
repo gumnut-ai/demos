@@ -1178,6 +1178,14 @@ async function render() {
   const face = state.faces[state.index];
   renderProgress();
 
+  // Detach (PATCH person_id: null) is a no-op against the server when
+  // the face is already unassigned — and marking it 'detached' locally
+  // would mislead the operator about what just happened. Hide the
+  // button for unassigned-tab faces; re-show it otherwise (every other
+  // tab has a current owner to detach from).
+  const detachBtnEl = document.getElementById('detach-btn');
+  if (detachBtnEl) detachBtnEl.hidden = (face.mode === 'unassigned');
+
   const subject = state.snapshot.subject;
   const subjectName = subject.name ?? UNNAMED_LABEL;
   const reviewedTag = state.reviewed[face.face_id]
@@ -1457,6 +1465,11 @@ async function detachCurrent() {
   if (state.actionInFlight) return;
   if (state.index >= state.faces.length) return;
   const face = state.faces[state.index];
+  // Unassigned faces have no current owner to detach from — the PATCH
+  // would be a server-side no-op but the local 'detached' mark would
+  // still be misleading. The button is hidden in unassigned mode; this
+  // short-circuit covers the keyboard shortcut path.
+  if (face.mode === 'unassigned') return;
   flashButton(document.getElementById('detach-btn'));
   state.actionInFlight = true;
   try {
