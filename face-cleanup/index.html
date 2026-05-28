@@ -1188,6 +1188,29 @@ async function render() {
 
   const subject = state.snapshot.subject;
   const subjectName = subject.name ?? UNNAMED_LABEL;
+
+  // Accept confirms the face's *current* placement and hides it — it
+  // never calls the server. Spell out what "current" means in this tab
+  // so the operator isn't told a face is "assigned" when it's really
+  // unassigned (or sitting on a donor). textContent/.title are
+  // injection-safe, so the names don't need escaping here.
+  const acceptBtnEl = document.getElementById('accept-btn');
+  if (acceptBtnEl) {
+    let acceptLabel, acceptTitle;
+    if (face.mode === 'unassigned') {
+      acceptLabel = 'Accept — leave unassigned (A)';
+      acceptTitle = "Confirm this face should stay unassigned, don't show again";
+    } else if (face.mode === 'inverse') {
+      const donorName = face.current_person_name ?? UNNAMED_LABEL;
+      acceptLabel = `Accept — keep on ${donorName} (A)`;
+      acceptTitle = `Confirm this face should stay on ${donorName}, don't show again`;
+    } else {
+      acceptLabel = `Accept — keep on ${subjectName} (A)`;
+      acceptTitle = `Confirm this face is correctly on ${subjectName}, don't show again`;
+    }
+    acceptBtnEl.textContent = acceptLabel;
+    acceptBtnEl.title = acceptTitle;
+  }
   const reviewedTag = state.reviewed[face.face_id]
     ? `<span class="badge good">${state.reviewed[face.face_id]}</span>` : '';
 
