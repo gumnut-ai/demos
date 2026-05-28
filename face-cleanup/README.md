@@ -51,8 +51,9 @@ The credentials, library ID, and active subject persist in
 
 The header tabs filter the face list. The first five tabs review faces
 that are **already on the subject** — looking for misassignments to
-reassign or detach. The last tab is the inverse: faces currently on
-*other* people that may belong to the subject.
+reassign or detach. The last two tabs are the inverse: faces currently
+on *other* people, or unassigned entirely, that may belong to the
+subject.
 
 | Tab | Meaning |
 | --- | --- |
@@ -62,6 +63,7 @@ reassign or detach. The last tab is the inverse: faces currently on
 | Worst outliers | Faces with `d_current` ≥ `outlier_distance` (0.45), sorted descending. Surfaces faces far from the subject's centroid even when no competing centroid is nearby — typically wrong-identity faces with no clear alternate destination. |
 | All | All faces, worst-first. |
 | Could be on subject | The inverse view: faces currently assigned to **other** Persons whose nearest-candidate list contains the subject AND where the subject is closer than the face's current Person. Shows up as "currently: \<other name\>" with a single "Reassign to subject" candidate button. Lazy-loaded the first time you open the tab — fans out to every neighboring Person, so it's slower than the other tabs on first click. |
+| Unassigned candidates | Faces currently assigned to **no Person** (`person_id` is null) whose nearest-candidate list contains the subject — production clustering left them unassigned but still considered them close to the subject's centroid. Shows up as "currently: unassigned" with the nearby named Persons offered as destination buttons (closest first, the subject among them) so you can assign the face to whichever identity fits. The face list itself is ordered closest-to-subject first. Lazy-loaded on first click; walks every face in the library (no `person_id IS NULL` server-side filter), so on big libraries this is slower than the inverse tab. |
 
 ### Per-face actions
 
@@ -99,6 +101,10 @@ subject Person it calls:
   **Could be on subject** tab fans the same call out across every
   neighboring Person, then keeps faces whose candidate list contains
   the subject closer than their current Person.
+- `GET /api/faces?library_id=…&include=cluster_assignment` (no
+  `person_id`, paginated) — every face in the library, used by the
+  **Unassigned candidates** tab. Walked client-side to keep rows whose
+  `person_id` is null AND whose candidate list contains the subject.
 - `GET /api/faces/{id}` and `GET /api/assets?ids=…` — face-crop and
   parent-asset thumbnails plus the bbox overlay (lazy + prefetched).
 - `PATCH /api/faces/{id}` — reassignments and detaches.
