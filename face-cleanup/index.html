@@ -438,6 +438,21 @@ class Client {
     if (startingAfterId) qs.set('starting_after_id', startingAfterId);
     return this._req('GET', `/api/faces?${qs}`);
   }
+  // One page of every face in the library — used by the "Unassigned
+  // candidates" tab, which has no person scope to filter on server-side
+  // (the API has no person_id=NULL query mode, so we walk the full list
+  // and filter to unassigned client-side). include=cluster_assignment
+  // still populates each row's candidates even when person_id is null —
+  // the server's LATERAL candidate query treats NULL as a real value via
+  // ``Person.id.is_distinct_from(Face.person_id)``.
+  listAllFacesPage(libraryId, startingAfterId) {
+    const qs = new URLSearchParams();
+    qs.set('library_id', libraryId);
+    qs.set('include', 'cluster_assignment');
+    qs.set('limit', '200');
+    if (startingAfterId) qs.set('starting_after_id', startingAfterId);
+    return this._req('GET', `/api/faces?${qs}`);
+  }
   listAssetsByIds(assetIds, libraryId) {
     const qs = new URLSearchParams();
     assetIds.forEach(id => qs.append('ids', id));
@@ -618,6 +633,12 @@ async function buildSnapshot(libraryId, personId, peopleAll, onProgress) {
     // for big libraries; we only pay it when the operator opens the tab.
     inverseFaces: null,
     inverseLoading: false,
+    // Lazily populated — see ensureUnassignedFaces(). Walks every face
+    // in the library (no server-side ``person_id IS NULL`` query mode),
+    // so this is heavier than the inverse build on big libraries. Only
+    // paid when the operator opens the "Unassigned candidates" tab.
+    unassignedFaces: null,
+    unassignedLoading: false,
   };
 }
 
@@ -710,6 +731,75 @@ async function buildInverseFaces(snapshot, onProgress) {
   return inverseFaces;
 }
 
+// Build the unassigned-tab face list: faces with no person assignment
+// (Face.person_id IS NULL) whose top-K candidate list contains the
+// subject. These are faces production clustering left unassigned but
+// still considered close to the subject's centroid — a high-value
+// triage target the standard tabs don't surface.
+//
+// There is no ``person_id IS NULL`` query mode on /api/faces, so we
+// have to walk every face in the library. Bounded by total face count,
+// which on a big library can dwarf the inverse-tab fan-out — that's
+// why this is lazy-loaded on first tab click and exposes a
+// pages-walked progress signal.
+async function buildUnassignedFaces(snapshot, onProgress) {
+  const subjectId = snapshot.subject.id;
+  const unassignedFaces = [];
+  let pagesWalked = 0;
+  let cursor = null;
+  try {
+    while (true) {
+      // Bail out if the operator switches subjects mid-build — the
+      // accumulated list belongs to the abandoned snapshot.
+      if (state.snapshot !== snapshot) return unassignedFaces;
+      const page = await state.client.listAllFacesPage(snapshot.library_id, cursor);
+      const rows = page.data || [];
+      pagesWalked += 1;
+      for (const f of rows) {
+        if (f.person_id != null) continue;
+        const cands = f.cluster_assignment?.candidates ?? [];
+        const subjCand = cands.find(c => c.person_id === subjectId);
+        if (!subjCand || subjCand.distance == null) continue;
+        unassignedFaces.push({
+          face_id: f.id,
+          asset_id: f.asset_id,
+          bbox: f.bounding_box,
+          // Unassigned faces have no current-Person distance; treat as
+          // +Infinity so the meta line renders 'n/a' (same convention
+          // as centroidless clusters in the normal tabs).
+          d_current: Infinity,
+          d_subject: subjCand.distance,
+          candidates: [{
+            id: subjectId,
+            name: snapshot.subject.name,
+            d: subjCand.distance,
+          }],
+          mode: 'unassigned',
+          // ``initial_person_id`` seeds currentPersonId() before any
+          // PATCH; null mirrors the face's pre-action owner so Undo of
+          // an unassigned reassignment puts the face back into the
+          // unassigned pool (PATCH person_id: null).
+          initial_person_id: null,
+          // Match the same flag shape as normal/inverse faces so the
+          // tab/badge code doesn't have to special-case mode.
+          closer_to_other: false,
+          sibling_ambig: false,
+          within_distance_gate: false,
+        });
+      }
+      if (onProgress) onProgress(pagesWalked, unassignedFaces.length);
+      if (!page.has_more || !rows.length) break;
+      cursor = rows[rows.length - 1].id;
+    }
+  } catch (e) {
+    console.warn('Unassigned build: stopping early after error', e);
+  }
+  // Closest-to-subject first: best "should belong to subject" leads.
+  unassignedFaces.sort((a, b) => a.d_subject - b.d_subject);
+  if (onProgress) onProgress(pagesWalked, unassignedFaces.length);
+  return unassignedFaces;
+}
+
 function applyFilter(filter) {
   let list;
   if (filter === 'inverse') {
@@ -717,6 +807,9 @@ function applyFilter(filter) {
     // resolves we render an empty list (the loading-state UI is owned
     // by render(), driven by ``snapshot.inverseLoading``).
     list = state.snapshot.inverseFaces ?? [];
+  } else if (filter === 'unassigned') {
+    // Same lazy-computed pattern as inverse — see ensureUnassignedFaces().
+    list = state.snapshot.unassignedFaces ?? [];
   } else {
     const all = state.snapshot.faces;
     if (filter === 'closer')      list = all.filter(f => f.closer_to_other);
@@ -912,13 +1005,21 @@ function renderTabs() {
   else if (state.snapshot.inverseFaces != null) inverseLabel = `Could be on subject (${state.snapshot.inverseFaces.length})`;
   else                                        inverseLabel = 'Could be on subject (?)';
 
+  // Same '?' / 'loading…' / final-count cycle as the inverse tab — the
+  // unassigned build also can't pre-count without walking the library.
+  let unassignedLabel;
+  if (state.snapshot.unassignedLoading)         unassignedLabel = 'Unassigned candidates (loading…)';
+  else if (state.snapshot.unassignedFaces != null) unassignedLabel = `Unassigned candidates (${state.snapshot.unassignedFaces.length})`;
+  else                                          unassignedLabel = 'Unassigned candidates (?)';
+
   const defs = [
-    ['closer',   `Closer to another (${counts.closer})`],
-    ['ambig',    `Sibling-ambiguous (${counts.ambig})`],
-    ['gate',     `Any in-gate alt (${counts.gate})`],
-    ['outliers', `Worst outliers (${counts.outliers})`],
-    ['all',      `All (${counts.all})`],
-    ['inverse',  inverseLabel],
+    ['closer',     `Closer to another (${counts.closer})`],
+    ['ambig',      `Sibling-ambiguous (${counts.ambig})`],
+    ['gate',       `Any in-gate alt (${counts.gate})`],
+    ['outliers',   `Worst outliers (${counts.outliers})`],
+    ['all',        `All (${counts.all})`],
+    ['inverse',    inverseLabel],
+    ['unassigned', unassignedLabel],
   ];
   tabs.innerHTML = '';
   for (const [key, label] of defs) {
@@ -961,6 +1062,35 @@ async function ensureInverseFaces() {
   }
 }
 
+// Triggered the first time the operator opens the unassigned tab. Walks
+// every face in the library and keeps unassigned rows whose top-K
+// candidate list contains the subject. Subsequent opens hit the cached
+// list.
+async function ensureUnassignedFaces() {
+  const snap = state.snapshot;
+  if (snap.unassignedFaces != null || snap.unassignedLoading) return;
+  snap.unassignedLoading = true;
+  renderTabs();
+  faceHost.innerHTML = `<div class="card" id="unassigned-loading">Loading unassigned-candidate list…</div>`;
+  progress.innerHTML = '';
+  try {
+    snap.unassignedFaces = await buildUnassignedFaces(snap, (pages, found) => {
+      if (state.filter !== 'unassigned') return;
+      const el = document.getElementById('unassigned-loading');
+      if (el) {
+        el.textContent = `Loading unassigned-candidate list… ${pages} page${pages === 1 ? '' : 's'} walked · ${found} candidate face${found === 1 ? '' : 's'} found`;
+      }
+    });
+    for (const f of snap.unassignedFaces) snap.facesById.set(f.face_id, f);
+  } catch (e) {
+    toast(`Failed to load unassigned-candidate list: ${e.message}`, 'error', 6000);
+    console.error(e);
+    snap.unassignedFaces = [];
+  } finally {
+    snap.unassignedLoading = false;
+  }
+}
+
 async function setFilter(filter) {
   state.filter = filter;
   localStorage.setItem(LS_KEY_FILTER, filter);
@@ -978,6 +1108,17 @@ async function setFilter(filter) {
     // loading — re-render the tabs so the new count is visible, but
     // don't clobber the active filter's view.
     if (state.filter !== 'inverse') {
+      renderTabs();
+      return;
+    }
+  }
+  if (filter === 'unassigned' && state.snapshot.unassignedFaces == null) {
+    if (state.snapshot.unassignedLoading) {
+      renderTabs();
+      return;
+    }
+    await ensureUnassignedFaces();
+    if (state.filter !== 'unassigned') {
       renderTabs();
       return;
     }
@@ -1007,6 +1148,9 @@ function countByAction(action) {
 function badgeFor(face) {
   if (face.mode === 'inverse') {
     return `<span class="badge warn">could be subject</span>`;
+  }
+  if (face.mode === 'unassigned') {
+    return `<span class="badge warn">unassigned</span>`;
   }
   const out = [];
   if (face.closer_to_other) out.push(`<span class="badge bad">closer-to-other</span>`);
@@ -1042,10 +1186,14 @@ async function render() {
   // The meta line and candidates-section header are mode-aware. For
   // normal-tab faces we identify the subject and show alternate
   // destinations. For inverse-tab faces we identify the *current* donor
-  // and show the subject as the only destination — the operator's job
-  // is to confirm whether the face really belongs to the subject.
+  // and show the subject as the only destination. For unassigned-tab
+  // faces the current owner is null — we just show "unassigned" as the
+  // current state and the subject as the proposed destination. In both
+  // non-normal modes the operator's job is to confirm whether the face
+  // really belongs to the subject.
   // d_current is +Infinity when the face has no centroid on its current
-  // Person (a centroidless cluster); show 'n/a' rather than "Infinity".
+  // Person (a centroidless cluster) or has no current Person at all
+  // (unassigned); show 'n/a' rather than "Infinity".
   const dCurrentStr = isFinite(face.d_current) ? face.d_current.toFixed(3) : 'n/a';
   let metaCore;
   let candidatesHeader;
@@ -1056,6 +1204,12 @@ async function render() {
       <span> · <strong>subject:</strong> ${escapeHtml(subjectName)} · d=${face.d_subject.toFixed(3)}</span>
     `;
     candidatesHeader = 'Reassign to subject';
+  } else if (face.mode === 'unassigned') {
+    metaCore = `
+      <span><strong>currently:</strong> unassigned · d=${dCurrentStr}</span>
+      <span> · <strong>subject:</strong> ${escapeHtml(subjectName)} · d=${face.d_subject.toFixed(3)}</span>
+    `;
+    candidatesHeader = 'Assign to subject';
   } else {
     metaCore = `<span><strong>${escapeHtml(subjectName)}</strong> · d=${dCurrentStr}</span>`;
     candidatesHeader = 'Nearby candidates';
@@ -1713,11 +1867,13 @@ async function launchCleanup() {
 
   hideAllPanels();
   content.hidden = false;
-  // If the operator left the page on the inverse tab, kick off the
-  // lazy build so they don't land on an empty "No faces match this
-  // filter" view. Same path setFilter() takes for an explicit click.
+  // If the operator left the page on a lazy-built tab, kick off the
+  // build so they don't land on an empty "No faces match this filter"
+  // view. Same path setFilter() takes for an explicit click.
   if (state.filter === 'inverse') {
     await ensureInverseFaces();
+  } else if (state.filter === 'unassigned') {
+    await ensureUnassignedFaces();
   }
   applyFilter(state.filter);
   renderTabs();
