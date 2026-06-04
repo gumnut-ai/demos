@@ -487,7 +487,7 @@ class Client {
 }
 
 // ---------- state ----------
-const PREFETCH_LOOKAHEAD = 32;   // faces ahead of current to keep warm
+const PREFETCH_RADIUS = 2;       // faces on each side of current to keep warm
 const PREFETCH_BATCH_SIZE = 100; // matches MAX_BULK_GET_IDS server-side
 
 const state = {
@@ -866,16 +866,21 @@ async function ensureAsset(assetId) {
   return a;
 }
 
-// Warm the cache for upcoming faces. Without this, every advance pays
-// a metadata round-trip + a fresh CDN download for the face crop.
+// Warm the cache for the current face's immediate neighbors. Without
+// this, every advance pays a metadata round-trip + a fresh CDN download
+// for the face crop.
 //
-// We batch-fetch the next PREFETCH_LOOKAHEAD face IDs (and their parent
-// assets, so the "open asset" link can hit a signed CDN URL instead of
-// a Bearer-auth API endpoint), then kick off a hidden ``Image`` load
-// for each thumbnail URL so the browser stashes the bytes in its HTTP
-// cache. By the time the user advances, both the metadata and the
-// image are already local.
-async function prefetchAhead() {
+// We only warm the PREFETCH_RADIUS faces on each side of the current one
+// — render() already fetches the current face itself. For each
+// neighbor we batch-fetch the face IDs (and their parent assets, so
+// the "open asset" link can hit a signed CDN URL instead of a Bearer-auth
+// API endpoint), then kick off a hidden ``Image`` load for each thumbnail
+// URL so the browser stashes the bytes in its HTTP cache. By the time the
+// user steps to an adjacent face, both the metadata and the image are
+// already local. Keeping the window tiny matters: a wide lookahead fires
+// dozens of concurrent CDN image loads per advance, which can trip the
+// image CDN's rate limiter.
+async function prefetchNeighbors() {
   if (state.prefetchInFlight) return;
   // Track where we started so we can detect "user advanced past the
   // window we just prefetched" — if so, fire another batch from finally
@@ -883,9 +888,15 @@ async function prefetchAhead() {
   const startIndex = state.index;
   const needFaces = [];
   const needAssets = new Set();
-  for (let i = startIndex;
-       i < state.faces.length && needFaces.length < PREFETCH_LOOKAHEAD;
-       i++) {
+  // Symmetric window around the current index, clamped to the list — the
+  // previous and next PREFETCH_RADIUS faces. Already-cached neighbors
+  // (e.g. faces you just came from, and nearer faces warmed on prior
+  // advances) are skipped by the has()-guards below, so in steady forward
+  // navigation this newly loads only the faces not yet warmed — typically
+  // just the furthest one ahead.
+  const lo = Math.max(0, startIndex - PREFETCH_RADIUS);
+  const hi = Math.min(state.faces.length - 1, startIndex + PREFETCH_RADIUS);
+  for (let i = lo; i <= hi; i++) {
     const f = state.faces[i];
     if (!state.faceCache.has(f.face_id)) needFaces.push(f.face_id);
     if (!state.assetCache.has(f.asset_id)) needAssets.add(f.asset_id);
@@ -940,7 +951,7 @@ async function prefetchAhead() {
     state.prefetchInFlight = false;
     // If the operator hammered through faces during this fetch, the
     // current index now points beyond what we just warmed — chase it.
-    if (state.index > startIndex) prefetchAhead();
+    if (state.index > startIndex) prefetchNeighbors();
   }
 }
 
@@ -1168,7 +1179,7 @@ async function setFilter(filter) {
   applyFilter(filter);
   renderTabs();
   render();
-  prefetchAhead();
+  prefetchNeighbors();
 }
 
 function renderProgress() {
@@ -1643,7 +1654,7 @@ function advance() {
   do { state.index += 1; }
   while (state.index < state.faces.length && state.reviewed[state.faces[state.index].face_id]);
   render();
-  prefetchAhead();
+  prefetchNeighbors();
 }
 
 function back() {
@@ -1975,7 +1986,7 @@ async function launchCleanup() {
   applyFilter(state.filter);
   renderTabs();
   render();
-  prefetchAhead();
+  prefetchNeighbors();
 }
 
 init().catch(e => {
