@@ -113,8 +113,10 @@ public struct GumnutClient: Sendable {
         // written or deleted.
         let bodyURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("upload-body-\(UUID().uuidString)")
-        let stagedDigest = try form.writeEncoded(to: bodyURL)
+        // Installed before staging: a throw mid-encode (disk full, source
+        // unreadable) must not strand a multi-gigabyte partial body.
         defer { try? FileManager.default.removeItem(at: bodyURL) }
+        let stagedDigest = try form.writeEncoded(to: bodyURL)
         if let expectedSHA256, stagedDigest != expectedSHA256 {
             throw GumnutClientError.stagedFileChanged
         }

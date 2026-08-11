@@ -303,9 +303,17 @@ final class AppModel {
                     "API key changed. Sync state was reset (file hashes kept) — "
                     + "run Analyze to rebuild it for this account."
             } catch {
+                // The reset failed: activating the new key over the old
+                // account's surviving state is exactly what the reset
+                // prevents — roll the key back instead.
+                apiKey = previous
+                _ = KeychainStore.saveAPIKey(previous, server: serverURLString)
                 alertMessage =
                     "Could not reset sync state for the new API key: "
                     + error.localizedDescription
+                    + " The previous key remains active."
+                refresh()
+                return false
             }
             refresh()
         }

@@ -694,9 +694,16 @@ public final class Store: Sendable {
     public func setExcluded(
         rootId: Int64, kind: Exclusion.Kind, relPath: String, excluded: Bool
     ) throws {
+        // Each branch is ONE write transaction: an exclusion row that commits
+        // without its status update (crash, second-write failure) would make
+        // the review UI show "excluded" while the rows stay pending — and
+        // pending is what the upload selects.
         if excluded {
-            try addExclusion(rootId: rootId, kind: kind, relPath: relPath)
             try writer.write { db in
+                var exclusion = Exclusion(
+                    id: nil, rootId: rootId, kind: kind, relPath: relPath, createdAt: Date()
+                )
+                try exclusion.insert(db, onConflict: .ignore)
                 try db.execute(
                     sql: """
                         UPDATE files SET status = ?
@@ -709,9 +716,14 @@ public final class Store: Sendable {
                 )
             }
         } else {
-            try removeExclusion(rootId: rootId, kind: kind, relPath: relPath)
-            let remaining = try exclusions(forRoot: rootId)
             try writer.write { db in
+                try db.execute(
+                    sql: "DELETE FROM exclusions WHERE root_id = ? AND kind = ? AND rel_path = ?",
+                    arguments: [rootId, kind.rawValue, relPath]
+                )
+                let remaining = try Exclusion
+                    .filter(Column("root_id") == rootId)
+                    .fetchAll(db)
                 let covered = try FileRecord.fetchAll(
                     db,
                     sql: """
