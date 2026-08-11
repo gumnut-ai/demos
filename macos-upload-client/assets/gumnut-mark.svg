@@ -1,0 +1,42 @@
+<svg width="125" height="125" viewBox="0 0 125 125" fill="none" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+<mask id="mask0_67_344" style="mask-type:alpha" maskUnits="userSpaceOnUse" x="0" y="0" width="125" height="125">
+<ellipse cx="62.0633" cy="62.0614" rx="62.0633" ry="62.0614" fill="#D9D9D9"/>
+</mask>
+<g mask="url(#mask0_67_344)">
+<rect x="-0.936279" y="-0.664062" width="125.732" height="125.728" fill="url(#g_base_L)"/>
+<rect x="-0.936279" y="-0.664062" width="125.732" height="125.728" fill="url(#g_br_L)"/>
+<rect x="-0.936279" y="-0.664062" width="125.732" height="125.728" fill="url(#g_bl_L)"/>
+<rect x="-0.936279" y="-0.664062" width="125.732" height="125.728" fill="url(#g_teal_L)"/>
+<rect x="-0.936279" y="-0.664062" width="125.732" height="125.728" fill="url(#g_tr_L)"/>
+<rect x="-0.936279" y="-0.664062" width="125.732" height="125.728" fill="url(#g_tl_L)"/>
+<path d="M46.7669 78.4658C41.1442 85.8734 30.122 94.2702 43.4391 102.301C53.6752 108.474 55.4929 89.1416 57.448 83.3511C60.0546 75.6316 67.2838 68.8754 76.3847 77.6926C83.2288 84.3233 90.9177 98.6772 99.0022 88.7287C107.087 78.7802 88.3812 72.4945 84.6184 68.87C80.8555 65.2455 69.0551 58.1555 86.9076 51.6712C101.049 46.5348 109.372 44.5641 102.843 36.075C96.3138 27.5859 85.936 38.0801 81.0395 41.8527C68.9209 51.1899 63.1466 48.7343 64.3935 33.7486C65.5541 19.8007 59.5073 16.6325 51.7989 18.5212C37.3484 22.0617 44.7622 31.2631 48.2699 38.4616C51.498 45.0865 56.3841 53.136 43.1789 51.3792C33.6343 50.1094 14.2644 43.4857 16.2098 58.1723C17.4401 67.4594 29.8876 65.0649 40.4434 63.6666C52.8599 62.0218 52.8085 70.5064 46.7669 78.4658Z" fill="white"/>
+</g>
+<defs>
+<linearGradient id="g_base_L" x1="0.1" y1="0" x2="0.6" y2="1">
+<stop offset="0" stop-color="#d98f8a"/>
+<stop offset="0.45" stop-color="#7d83db"/>
+<stop offset="1" stop-color="#8273e6"/>
+</linearGradient>
+<radialGradient id="g_tl_L" cx="0" cy="0" r="0.6">
+<stop offset="0" stop-color="#ff7a4d"/>
+<stop offset="0.45" stop-color="#ff8559" stop-opacity="0.7"/>
+<stop offset="1" stop-color="#ff8559" stop-opacity="0"/>
+</radialGradient>
+<radialGradient id="g_tr_L" cx="1" cy="0" r="0.62">
+<stop offset="0" stop-color="#cd789f" stop-opacity="0.9"/>
+<stop offset="1" stop-color="#cd789f" stop-opacity="0"/>
+</radialGradient>
+<radialGradient id="g_bl_L" cx="0" cy="1" r="0.72">
+<stop offset="0" stop-color="#9460ea" stop-opacity="0.92"/>
+<stop offset="1" stop-color="#9460ea" stop-opacity="0"/>
+</radialGradient>
+<radialGradient id="g_teal_L" cx="0.72" cy="0.66" r="0.5">
+<stop offset="0" stop-color="#5ec8e0" stop-opacity="0.95"/>
+<stop offset="1" stop-color="#5ec8e0" stop-opacity="0"/>
+</radialGradient>
+<radialGradient id="g_br_L" cx="1" cy="1" r="0.62">
+<stop offset="0" stop-color="#62b6ee" stop-opacity="0.9"/>
+<stop offset="1" stop-color="#62b6ee" stop-opacity="0"/>
+</radialGradient>
+</defs>
+</svg>
