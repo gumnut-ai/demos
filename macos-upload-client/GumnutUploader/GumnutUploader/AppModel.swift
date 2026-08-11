@@ -92,10 +92,8 @@ final class AppModel {
             serverURLString = (try? store.serverURL()) ?? Store.defaultServerURL
             apiKey = KeychainStore.loadAPIKey(server: serverURLString) ?? ""
             selectedLibraryId = try? store.libraryId()
-            hashConcurrency = (try? store.setting("hash_concurrency")).flatMap { $0 }
-                .flatMap(Int.init) ?? 2
-            uploadConcurrency = (try? store.setting("upload_concurrency")).flatMap { $0 }
-                .flatMap(Int.init) ?? 3
+            hashConcurrency = (try? store.hashConcurrency()).flatMap { $0 } ?? 2
+            uploadConcurrency = (try? store.uploadConcurrency()).flatMap { $0 } ?? 3
             refresh()
         } catch {
             storeError = "Could not open the state database: \(error.localizedDescription)"
@@ -244,23 +242,34 @@ final class AppModel {
         connectionStatus = .unknown
     }
 
-    func applyServerSettings() {
+    /// Validates and applies a server URL + target library. The applied
+    /// values (`serverURLString`, `selectedLibraryId`) — what runs actually
+    /// use — only ever change here, together with the store's sync-state
+    /// reset, so an edited-but-unapplied destination can never be uploaded
+    /// to against the old destination's sync state.
+    func applyServerSettings(serverURL candidate: String, libraryId: String?) {
         guard let store else { return }
-        serverURLString = Self.normalizeServerURL(serverURLString)
-        guard let url = URL(string: serverURLString),
+        let normalized = Self.normalizeServerURL(candidate)
+        guard let url = URL(string: normalized),
             url.scheme == "https" || url.scheme == "http"
         else {
             alertMessage = "The server URL must be a valid http(s) URL."
             return
         }
+        // A library id is only meaningful on the server it was listed from;
+        // changing servers drops it until the user picks one from the new
+        // server's list.
+        let library = normalized == serverURLString ? libraryId : nil
         do {
             let didReset = try store.updateServerConfiguration(
-                serverURL: serverURLString, libraryId: selectedLibraryId
+                serverURL: normalized, libraryId: library
             )
+            serverURLString = normalized
+            selectedLibraryId = library
             // Every server has its own API key: switch to the new server's
             // saved key, or to none (the app returns to setup) if it has
             // never been entered.
-            apiKey = KeychainStore.loadAPIKey(server: serverURLString) ?? ""
+            apiKey = KeychainStore.loadAPIKey(server: normalized) ?? ""
             libraries = []
             if didReset {
                 // The reviewed plan belonged to the old destination.
@@ -289,8 +298,8 @@ final class AppModel {
 
     func savePerformanceSettings() {
         guard let store else { return }
-        try? store.setSetting("hash_concurrency", to: String(hashConcurrency))
-        try? store.setSetting("upload_concurrency", to: String(uploadConcurrency))
+        try? store.setHashConcurrency(hashConcurrency)
+        try? store.setUploadConcurrency(uploadConcurrency)
     }
 
     func testConnection() async {
@@ -301,7 +310,15 @@ final class AppModel {
         connectionStatus = .testing
         do {
             let user = try await client.currentUser()
-            libraries = (try? await client.libraries()) ?? []
+            do {
+                libraries = try await client.libraries()
+            } catch {
+                // The key works but the picker would be silently empty — say
+                // why, instead of looking like an account with no libraries.
+                alertMessage =
+                    "Connected, but the library list could not be loaded: "
+                    + Self.describe(error)
+            }
             connectionStatus = .ok(userId: user.id)
         } catch {
             connectionStatus = .failed(Self.describe(error))

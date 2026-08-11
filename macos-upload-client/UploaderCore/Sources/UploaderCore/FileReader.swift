@@ -20,8 +20,9 @@ public struct EnumerationFailure: Sendable {
     public let message: String
 }
 
-/// The only filesystem access layer in the app, and deliberately read-only:
-/// it can enumerate, stat, and open files for reading — nothing else.
+/// Read-only enumeration and stat layer over user files. The only other user
+/// file access in the app — hashing and upload-body encoding — opens
+/// read-only `FileHandle`s; nothing anywhere opens a user file for writing.
 public struct FileReader: Sendable {
     public init() {}
 
@@ -69,8 +70,18 @@ public struct FileReader: Sendable {
         }
 
         for case let url as URL in enumerator {
-            let values = try? url.resourceValues(forKeys: Set(keys))
-            guard let values, values.isSymbolicLink != true, values.isRegularFile == true else {
+            let values: URLResourceValues
+            do {
+                values = try url.resourceValues(forKeys: Set(keys))
+            } catch {
+                // An unreadable file is a failure, not a skip — callers treat
+                // failure-free enumeration as proof that unseen rows are gone.
+                failures.append(
+                    EnumerationFailure(path: url.path, message: error.localizedDescription)
+                )
+                continue
+            }
+            guard values.isSymbolicLink != true, values.isRegularFile == true else {
                 continue
             }
             guard let size = values.fileSize, let modified = values.contentModificationDate else {
@@ -112,10 +123,6 @@ public struct FileReader: Sendable {
             throw CocoaError(.fileReadUnknown, userInfo: [NSFilePathErrorKey: url.path])
         }
         return (Int64(size), modified.timeIntervalSince1970)
-    }
-
-    public func openForReading(url: URL) throws -> FileHandle {
-        try FileHandle(forReadingFrom: url)
     }
 
     /// Reachability probe for a root (an unmounted network volume fails here).

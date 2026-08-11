@@ -486,4 +486,43 @@ import Testing
         #expect(Store.parentDirectory(of: "x/a.jpg") == "x")
         #expect(Store.parentDirectory(of: "x/y/a.jpg") == "x/y")
     }
+
+    @Test func addRootRejectsSymlinkAliasOfExistingRoot() throws {
+        let store = try Store.inMemory()
+        let dir = try TempDir()
+        let real = dir.url.appendingPathComponent("real", isDirectory: true)
+        try FileManager.default.createDirectory(at: real, withIntermediateDirectories: true)
+        let alias = dir.url.appendingPathComponent("alias")
+        try FileManager.default.createSymbolicLink(at: alias, withDestinationURL: real)
+
+        try store.addRoot(path: real.path)
+        #expect(throws: StoreError.self) {
+            try store.addRoot(path: alias.path)
+        }
+    }
+
+    @Test func pruneVanishedFilesScopesToRootAndHonorsMarkSeen() throws {
+        let store = try Store.inMemory()
+        let rootA = try store.addRoot(path: "/photos/a")
+        let rootB = try store.addRoot(path: "/photos/b")
+        func record(_ rootId: Int64, _ relPath: String, scanId: Int64?) throws {
+            try store.recordScannedFile(
+                rootId: rootId, relPath: relPath, size: 1, mtime: 1,
+                classification: .image, excluded: false, scanId: scanId
+            )
+        }
+        try record(rootA.id!, "seen.jpg", scanId: 7)
+        try record(rootA.id!, "deferred.jpg", scanId: 6)
+        try record(rootA.id!, "vanished.jpg", scanId: nil)
+        try record(rootB.id!, "other-root.jpg", scanId: 1)
+        try store.markSeen(rootId: rootA.id!, relPaths: ["deferred.jpg"], scanId: 7)
+
+        let pruned = try store.pruneVanishedFiles(rootId: rootA.id!, scanId: 7)
+
+        #expect(pruned == 1)
+        let remainingA = try store.files(underDirectory: "", rootId: rootA.id!)
+        #expect(remainingA.files.map(\.relPath) == ["deferred.jpg", "seen.jpg"])
+        let remainingB = try store.files(underDirectory: "", rootId: rootB.id!)
+        #expect(remainingB.files.map(\.relPath) == ["other-root.jpg"])
+    }
 }

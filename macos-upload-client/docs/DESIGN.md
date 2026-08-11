@@ -78,11 +78,11 @@ made in Gumnut.
    entitlement. Deleting or modifying a user file is not a code path we
    avoid — it is a syscall the OS refuses. The app can only write
    inside its own container (database, logs, upload staging).
-2. **Read-only file layer.** All access to user files goes through a
-   `FileReader` type exposing only enumerate, stat, and open-for-read.
-   The only writes anywhere in the codebase target the app's own
-   container: the state database and a temporary upload-body staging
-   file.
+2. **Read-only file access in code, too.** Enumeration and stat go
+   through a `FileReader` type; hashing and upload-body encoding open
+   read-only `FileHandle`s. The only writes anywhere in the codebase
+   target the app's own container: the state database and a temporary
+   upload-body staging file.
 3. **Additive-only API client.** The client implements exactly the
    endpoints it needs (validate key, list libraries, bulk existence
    check, upload). Trash/delete/update endpoints do not exist in the
@@ -110,13 +110,13 @@ item, no background agent.
   FileReader Hasher GumnutClient      Store (GRDB/SQLite)
   (read-only (SHA-256, (URLSession,   (app-container DB,
    enumerate/ CryptoKit  hand-rolled)  WAL mode)
-   stat/open) streaming)
+   stat)      streaming)
 ```
 
 - **SQLite is embedded** — a library compiled into the app (via GRDB),
   reading and writing a single file in the app container. No server,
   no daemon, nothing for the user to install or manage.
-- **GumnutClient is hand-rolled** over URLSession: five endpoints
+- **GumnutClient is hand-rolled** over URLSession: four endpoints
   against a configurable base URL (default `https://api.gumnut.ai`),
   and it distinguishes the `200`-duplicate from the `201`-created
   upload response by status code.
@@ -174,7 +174,11 @@ user-authored state.
    → `skipped_unsupported`. Stat every media file; `(size, mtime)`
    unchanged → keep the cached hash, else mark for re-hash. Files
    modified within the last ~30 seconds are deferred to the next run
-   (they may still be mid-copy).
+   (they may still be mid-copy). After a failure-free scan of a root,
+   rows the scan did not see are pruned — those files are gone from
+   disk (deleted, moved, or renamed; deferred files count as seen).
+   Unreachable roots and scans with enumeration failures never prune
+   (unreachable ≠ deleted).
 3. **Hash.** Streaming SHA-256 over files that need it, 2–3 files
    concurrently — network mounts reward few sequential streams over
    many parallel ones. This is the honest cost of the first run
@@ -195,8 +199,8 @@ user-authored state.
 6. **Upload.** Approved files only, ~3 concurrent, throttled
    client-side. Multipart `POST /assets` with `file_created_at` /
    `file_modified_at` from filesystem stats (the service extracts EXIF
-   itself), a stable `device_asset_id` (root UUID + relative-path
-   digest), and a per-install `device_id`. Response handling:
+   itself), a stable `device_asset_id` (root UUID + relative path),
+   and a per-install `device_id`. Response handling:
    - `201` → uploaded; `200` → already existed (record the asset ID
      either way). Compare the returned checksum against ours as a free
      integrity check.

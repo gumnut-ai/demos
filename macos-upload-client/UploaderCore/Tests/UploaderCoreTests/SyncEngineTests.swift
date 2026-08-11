@@ -256,6 +256,106 @@ private func assetJSON(id: String, checksumB64: String) -> String {
         #expect(second.counters.toUpload == 1)
     }
 
+    @Test func deletedFileIsPrunedOnNextAnalysis() async throws {
+        defer { EngineTestStub.reset() }
+        let env = try makeEnv()
+        let doomed = try writeAged(env.dir, "a.jpg", "aaa")
+        try writeAged(env.dir, "sub/b.jpg", "bbbb")
+        installRoutes(env)
+
+        _ = try await env.engine().runAnalysis()
+        #expect(try env.store.statusCounts()[.pending] == 2)
+
+        try FileManager.default.removeItem(at: doomed)
+        let second = try await env.engine().runAnalysis()
+
+        #expect(second.counters.filesDiscovered == 1)
+        #expect(try env.store.statusCounts()[.pending] == 1)
+        #expect(try env.store.hashedPendingFiles().map(\.relPath) == ["sub/b.jpg"])
+    }
+
+    @Test func deferredFileSurvivesPruneOnNextAnalysis() async throws {
+        defer { EngineTestStub.reset() }
+        let env = try makeEnv()
+        let url = try writeAged(env.dir, "a.jpg", "aaa")
+        installRoutes(env)
+
+        _ = try await env.engine().runAnalysis()
+        #expect(try env.store.statusCounts()[.pending] == 1)
+
+        // The file is edited moments before the next run: deferred as
+        // possibly mid-copy, but it was seen — its row must not be pruned.
+        try Data("aaa-changed".utf8).write(to: url)
+        let second = try await env.engine().runAnalysis()
+
+        #expect(second.counters.deferredRecentlyModified == 1)
+        #expect(try env.store.hashedPendingFiles().map(\.relPath) == ["a.jpg"])
+    }
+
+    @Test(.disabled(if: geteuid() == 0, "permission bits don't bind root"))
+    func enumerationFailureSkipsPruning() async throws {
+        defer { EngineTestStub.reset() }
+        let env = try makeEnv()
+        let doomed = try writeAged(env.dir, "a.jpg", "aaa")
+        try writeAged(env.dir, "locked/b.jpg", "bbbb")
+        installRoutes(env)
+
+        _ = try await env.engine().runAnalysis()
+        #expect(try env.store.statusCounts()[.pending] == 2)
+
+        // With an unreadable subtree the scan is known incomplete, so even a
+        // genuinely deleted file must keep its row until a clean scan.
+        let lockedDir = env.dir.url.appendingPathComponent("locked")
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o000], ofItemAtPath: lockedDir.path
+        )
+        defer {
+            try? FileManager.default.setAttributes(
+                [.posixPermissions: 0o755], ofItemAtPath: lockedDir.path
+            )
+        }
+        try FileManager.default.removeItem(at: doomed)
+
+        _ = try await env.engine().runAnalysis()
+        #expect(try env.store.statusCounts()[.pending] == 2)
+    }
+
+    @Test func existenceCheckPagesThroughBatches() async throws {
+        defer { EngineTestStub.reset() }
+        let env = try makeEnv()
+        try writeAged(env.dir, "a.jpg", "aaa")
+        try writeAged(env.dir, "b.jpg", "bbbb")
+        try writeAged(env.dir, "c.jpg", "ccccc")
+        // Only the middle page's checksum matches, so a file leaves the
+        // pending set between pages and the cursor must still not skip.
+        installRoutes(env) { body in
+            let sent = (try? JSONSerialization.jsonObject(with: body ?? Data())) as? [String: Any]
+            let checksums = sent?["checksums"] as? [String] ?? []
+            guard checksums.contains(sha256B64("bbbb")) else {
+                return .json(200, #"{"assets": []}"#)
+            }
+            return .json(
+                200,
+                #"{"assets": [{"id": "asset_b", "checksum": "\#(sha256B64("bbbb"))", "device_asset_id": "x", "device_id": "y"}]}"#
+            )
+        }
+
+        let result = try await env.engine { $0.existenceBatchSize = 1 }.runAnalysis()
+
+        let sentBatches = try env.bodies(for: "/api/assets/exist").map { body in
+            let sent = try JSONSerialization.jsonObject(with: body ?? Data()) as? [String: Any]
+            return Set(sent?["checksums"] as? [String] ?? [])
+        }
+        #expect(sentBatches.count == 3)
+        #expect(sentBatches.allSatisfy { $0.count == 1 })
+        #expect(
+            sentBatches.reduce(into: Set<String>()) { $0.formUnion($1) }
+                == Set([sha256B64("aaa"), sha256B64("bbbb"), sha256B64("ccccc")])
+        )
+        #expect(result.counters.alreadySynced == 1)
+        #expect(result.counters.toUpload == 2)
+    }
+
     @Test func unreachableRootIsSkippedWithoutStateChanges() async throws {
         defer { EngineTestStub.reset() }
         let env = try makeEnv()
@@ -462,6 +562,55 @@ private func assetJSON(id: String, checksumB64: String) -> String {
         #expect(result.failed == 0)
         // Still pending: uploads once space exists, no data forgotten.
         #expect(try env.store.statusCounts()[.pending] == 1)
+    }
+
+    @Test func uploadUnauthorizedStopsRunAndLeavesFilesPending() async throws {
+        defer { EngineTestStub.reset() }
+        let env = try makeEnv()
+        try writeAged(env.dir, "a.jpg", "aaa")
+        try writeAged(env.dir, "b.jpg", "bbbb")
+        installRoutes(env) { _ in
+            .json(200, #"{"assets": []}"#)
+        } upload: { _, _ in
+            .json(401, #"{"detail": "bad key"}"#)
+        }
+
+        let engine = env.engine { $0.uploadConcurrency = 1 }
+        let analysis = try await engine.runAnalysis()
+        await #expect(throws: GumnutClientError.unauthorized(statusCode: 401, message: "bad key")) {
+            _ = try await engine.runUpload(continuing: analysis.runId)
+        }
+
+        // Fatal stop: the second file is never attempted, and neither file is
+        // marked error — they stay pending for a run with working credentials.
+        #expect(env.calls.items.count { $0.path == "/api/assets" } == 1)
+        let counts = try env.store.statusCounts()
+        #expect(counts[.pending] == 2)
+        #expect(counts[.error] == nil)
+        #expect(try #require(try env.store.run(id: analysis.runId)).outcome == .failed)
+    }
+
+    @Test func uploadRetryExhaustionMarksFileError() async throws {
+        defer { EngineTestStub.reset() }
+        let env = try makeEnv()
+        try writeAged(env.dir, "b.jpg", "bbbb")
+        let attempts = AtomicCounter()
+        installRoutes(env) { _ in
+            .json(200, #"{"assets": []}"#)
+        } upload: { _, _ in
+            attempts.increment()
+            return .json(502, #"{"error_code": "transient_storage_error"}"#)
+        }
+
+        let engine = env.engine()
+        let analysis = try await engine.runAnalysis()
+        let result = try await engine.runUpload(continuing: analysis.runId)
+
+        // Exactly maxUploadAttempts tries, then the final error sticks.
+        #expect(attempts.count == 3)
+        #expect(result.uploaded == 0)
+        #expect(result.failed == 1)
+        #expect(try env.store.statusCounts()[.error] == 1)
     }
 
     @Test func uploadRetriesTransientErrorsThenSucceeds() async throws {

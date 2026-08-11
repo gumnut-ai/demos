@@ -19,7 +19,8 @@ public enum SyncEvent: Sendable, Equatable {
     case fileIssue(relPath: String, message: String)
 }
 
-/// Rate-limits progress emissions from URLSession's delegate queue.
+/// Rate-limits high-frequency progress emissions (URLSession delegate
+/// callbacks, per-file hash completions).
 private final class EmitGate: @unchecked Sendable {
     private let lock = NSLock()
     private var last = Date.distantPast
@@ -108,6 +109,7 @@ public actor SyncEngine {
     private var hashedBytesCount: Int64 = 0
     private var totalHashFiles = 0
     private var totalHashBytes: Int64 = 0
+    private let hashProgressGate = EmitGate()
 
     // Upload-phase state.
     private var uploadResult = UploadResult()
@@ -165,15 +167,25 @@ public actor SyncEngine {
             emit(.phase(.scanning))
             for root in reachable {
                 do {
-                    let rootTally = try scan(
+                    let (rootTally, enumerationComplete) = try scan(
                         root: root, runId: runId, previouslyDiscovered: tally.discovered
                     )
                     tally.merge(rootTally)
                     stillReachable.append(root)
+                    // Rows this scan did not see are files no longer under the
+                    // root (deleted, moved, or renamed); drop them so the plan
+                    // stops counting ghosts. Only after a failure-free
+                    // enumeration — an unreadable subtree must not read as
+                    // deletion, and unreachable roots never get here at all.
+                    if enumerationComplete {
+                        try store.pruneVanishedFiles(rootId: root.id!, scanId: runId)
+                    }
                 } catch is CancellationError {
                     throw CancellationError()
                 } catch {
-                    // Root vanished mid-run (unmount). Its state is untouched.
+                    // Only an unmount/vanish counts as unreachable — a store
+                    // failure must fail the run, not masquerade as one.
+                    guard !reader.directoryExists(atPath: root.path) else { throw error }
                     skippedPaths.append(root.path)
                     emit(.fileIssue(relPath: root.path, message: "root became unreachable; skipped"))
                 }
@@ -233,10 +245,11 @@ public actor SyncEngine {
     /// store and event sink are Sendable).
     private nonisolated func scan(
         root: Root, runId: Int64, previouslyDiscovered: Int
-    ) throws -> ScanTally {
+    ) throws -> (tally: ScanTally, enumerationComplete: Bool) {
         let exclusions = try store.exclusions(forRoot: root.id!)
         var tally = ScanTally()
         var buffer: [Store.ScannedFileInput] = []
+        var deferredPaths: [String] = []
 
         func flush() throws {
             try store.recordScannedFiles(rootId: root.id!, files: buffer, scanId: runId)
@@ -255,6 +268,7 @@ public actor SyncEngine {
             let age = config.now().timeIntervalSince1970 - file.mtime
             if age >= 0 && age < config.recentModificationGrace {
                 tally.deferred += 1
+                deferredPaths.append(file.relPath)
                 return
             }
 
@@ -277,10 +291,13 @@ public actor SyncEngine {
             }
         }
         try flush()
+        // Deferred files were seen — only their re-recording is postponed —
+        // so stamp them to keep them out of pruning's reach.
+        try store.markSeen(rootId: root.id!, relPaths: deferredPaths, scanId: runId)
         for failure in failures {
             emit(.fileIssue(relPath: failure.path, message: failure.message))
         }
-        return tally
+        return (tally, failures.isEmpty)
     }
 
     // MARK: - Hash phase
@@ -343,11 +360,21 @@ public actor SyncEngine {
                 }
             }
         }
+        emit(
+            .hashProgress(
+                hashedFiles: hashedFilesCount, totalFiles: totalHashFiles,
+                hashedBytes: hashedBytesCount, totalBytes: totalHashBytes
+            )
+        )
     }
 
     private func noteHashed(bytes: Int64) {
         hashedFilesCount += 1
         hashedBytesCount += bytes
+        // Hashing many small local files can finish thousands per second;
+        // forward at most a few events per second. hashPhase emits the final
+        // totals unconditionally once its loop drains.
+        guard hashProgressGate.shouldEmit(interval: 0.25) else { return }
         emit(
             .hashProgress(
                 hashedFiles: hashedFilesCount, totalFiles: totalHashFiles,
@@ -449,16 +476,19 @@ public actor SyncEngine {
             }
             try Task.checkCancellation()
 
-            let outcome: RunOutcome = fatalUploadError == nil ? .completed : .failed
-            try finishUploadRun(run: run, runId: runId, rootIds: rootIds, outcome: outcome)
+            // The generic catch below records the .failed finish.
             if let fatalUploadError {
                 throw fatalUploadError
             }
+            try finishUploadRun(run: run, runId: runId, rootIds: rootIds, outcome: .completed)
             emit(.phase(.finished))
             return uploadResult
         } catch is CancellationError {
             try? finishUploadRun(run: run, runId: runId, rootIds: rootIds, outcome: .cancelled)
             throw CancellationError()
+        } catch {
+            try? finishUploadRun(run: run, runId: runId, rootIds: rootIds, outcome: .failed)
+            throw error
         }
     }
 

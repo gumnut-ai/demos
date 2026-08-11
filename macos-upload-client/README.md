@@ -21,7 +21,7 @@ Requires Xcode 16+ on macOS 15+.
   `GumnutUploader/GumnutUploader.xcodeproj` in Xcode, or build with
   `xcodebuild -project GumnutUploader/GumnutUploader.xcodeproj -scheme GumnutUploader build`.
 
-Planned highlights:
+Highlights:
 
 - **Upload-only, and provably so** — the app runs sandboxed with
   read-only file access, so it is incapable of modifying or deleting

@@ -17,6 +17,8 @@ public final class Store: Sendable {
         static let libraryId = "library_id"
         static let deviceId = "device_id"
         static let lastAnalysisRunId = "last_analysis_run_id"
+        static let hashConcurrency = "hash_concurrency"
+        static let uploadConcurrency = "upload_concurrency"
     }
 
     private let writer: any DatabaseWriter
@@ -108,11 +110,13 @@ public final class Store: Sendable {
 
     // MARK: - Roots
 
-    /// Adds a root after normalizing the path and rejecting overlap with
-    /// existing roots, so no file can ever be tracked under two identities.
+    /// Adds a root after normalizing and canonicalizing the path (symlinks
+    /// resolved, so an aliased spelling of an existing root cannot slip past
+    /// the check) and rejecting overlap with existing roots, so no file can
+    /// ever be tracked under two identities.
     @discardableResult
     public func addRoot(path rawPath: String, bookmark: Data? = nil) throws -> Root {
-        let path = Self.normalize(path: rawPath)
+        let path = FileReader.canonicalPath(of: Self.normalize(path: rawPath))
         return try writer.write { db in
             let existingPaths = try String.fetchAll(db, sql: "SELECT path FROM roots")
             for existing in existingPaths {
@@ -244,74 +248,112 @@ public final class Store: Sendable {
     private static func upsertScannedFile(
         _ db: Database, rootId: Int64, input: ScannedFileInput, scanId: Int64?
     ) throws -> FileRecord {
-        let relPath = input.relPath
-        let size = input.size
-        let mtime = input.mtime
-        let classification = input.classification
-        let excluded = input.excluded
-        do {
-            let parentDir = Self.parentDirectory(of: relPath)
-            let fileName = String(relPath.split(separator: "/").last ?? Substring(relPath))
+        let parentDir = Self.parentDirectory(of: input.relPath)
+        let fileName = String(input.relPath.split(separator: "/").last ?? Substring(input.relPath))
 
-            guard
-                var record = try FileRecord
-                    .filter(Column("root_id") == rootId && Column("rel_path") == relPath)
-                    .fetchOne(db)
-            else {
-                var record = FileRecord(
-                    id: nil,
-                    rootId: rootId,
-                    relPath: relPath,
-                    parentDir: parentDir,
-                    fileName: fileName,
-                    size: size,
-                    mtime: mtime,
-                    sha256: nil,
-                    hashedAt: nil,
-                    status: excluded ? .excluded : classification.initialStatus,
-                    assetId: nil,
-                    syncedAt: nil,
-                    errorMessage: nil,
-                    lastSeenScanId: scanId
-                )
-                try record.insert(db)
-                return record
-            }
-
-            let contentUnchanged = record.size == size && record.mtime == mtime
-            record.size = size
-            record.mtime = mtime
-            record.lastSeenScanId = scanId
-
-            if !contentUnchanged {
-                record.sha256 = nil
-                record.hashedAt = nil
-                record.assetId = nil
-                record.syncedAt = nil
-                record.errorMessage = nil
-                record.status = excluded ? .excluded : classification.initialStatus
-            } else if excluded {
-                record.status = .excluded
-            } else {
-                switch record.status {
-                case .excluded:
-                    // Un-excluded: resume from what the cache still knows.
-                    record.status = record.assetId != nil ? .synced : classification.initialStatus
-                case .error:
-                    record.status = .pending
-                    record.errorMessage = nil
-                default:
-                    break
-                }
-            }
-            try record.update(db)
+        guard
+            var record = try FileRecord
+                .filter(Column("root_id") == rootId && Column("rel_path") == input.relPath)
+                .fetchOne(db)
+        else {
+            var record = FileRecord(
+                id: nil,
+                rootId: rootId,
+                relPath: input.relPath,
+                parentDir: parentDir,
+                fileName: fileName,
+                size: input.size,
+                mtime: input.mtime,
+                sha256: nil,
+                hashedAt: nil,
+                status: input.excluded ? .excluded : input.classification.initialStatus,
+                assetId: nil,
+                syncedAt: nil,
+                errorMessage: nil,
+                lastSeenScanId: scanId
+            )
+            try record.insert(db)
             return record
         }
+
+        let contentUnchanged = record.size == input.size && record.mtime == input.mtime
+        record.size = input.size
+        record.mtime = input.mtime
+        record.lastSeenScanId = scanId
+
+        if !contentUnchanged {
+            record.sha256 = nil
+            record.hashedAt = nil
+            record.assetId = nil
+            record.syncedAt = nil
+            record.errorMessage = nil
+            record.status = input.excluded ? .excluded : input.classification.initialStatus
+        } else if input.excluded {
+            record.status = .excluded
+        } else {
+            switch record.status {
+            case .excluded:
+                // Un-excluded: resume from what the cache still knows.
+                record.status =
+                    record.assetId != nil ? .synced : input.classification.initialStatus
+            case .error:
+                record.status = .pending
+                record.errorMessage = nil
+            default:
+                break
+            }
+        }
+        try record.update(db)
+        return record
     }
 
     static func parentDirectory(of relPath: String) -> String {
         guard let idx = relPath.lastIndex(of: "/") else { return "" }
         return String(relPath[relPath.startIndex..<idx])
+    }
+
+    /// Stamps existing rows as seen by the given scan without touching their
+    /// cached state — for files the scan visited but deliberately did not
+    /// re-record (mid-copy deferrals), so `pruneVanishedFiles` never deletes
+    /// a file that is still on disk.
+    public func markSeen(rootId: Int64, relPaths: [String], scanId: Int64) throws {
+        guard !relPaths.isEmpty else { return }
+        try writer.write { db in
+            // Chunked to stay under SQLite's bound-parameter limit.
+            var index = 0
+            while index < relPaths.count {
+                let chunk = Array(relPaths[index..<min(index + 500, relPaths.count)])
+                index += chunk.count
+                let placeholders = repeatElement("?", count: chunk.count)
+                    .joined(separator: ", ")
+                try db.execute(
+                    sql: """
+                        UPDATE files SET last_seen_scan_id = ?
+                        WHERE root_id = ? AND rel_path IN (\(placeholders))
+                        """,
+                    arguments: Self.statementArguments([scanId, rootId], chunk)
+                )
+            }
+        }
+    }
+
+    /// Deletes rows a completed, failure-free scan of `rootId` did not see —
+    /// those files are gone from disk (deleted, moved, or renamed). Callers
+    /// must not pass roots that were skipped or partially enumerated: an
+    /// unreachable or unreadable tree is not a deletion (unreachable ≠
+    /// deleted).
+    @discardableResult
+    public func pruneVanishedFiles(rootId: Int64, scanId: Int64) throws -> Int {
+        try writer.write { db in
+            try db.execute(
+                sql: """
+                    DELETE FROM files
+                    WHERE root_id = ? AND (last_seen_scan_id IS NULL OR last_seen_scan_id <> ?)
+                    """,
+                arguments: [rootId, scanId]
+            )
+            return db.changesCount
+        }
     }
 
     // MARK: - Hashing
@@ -481,16 +523,26 @@ public final class Store: Sendable {
     }
 
     public func statusCounts(rootIds: [Int64]? = nil) throws -> [FileStatus: Int] {
-        try writer.read { db in
+        if let rootIds, rootIds.isEmpty { return [:] }
+        return try writer.read { db in
+            // One GROUP BY pass, not a COUNT per status — this runs on the
+            // UI's live-refresh tick, where per-status table scans add up.
+            var sql = "SELECT status, COUNT(*) AS n FROM files"
+            var arguments: [any DatabaseValueConvertible] = []
+            if let rootIds {
+                let placeholders = repeatElement("?", count: rootIds.count)
+                    .joined(separator: ", ")
+                sql += " WHERE root_id IN (\(placeholders))"
+                arguments = rootIds
+            }
+            sql += " GROUP BY status"
             var counts: [FileStatus: Int] = [:]
-            for status in FileStatus.allCases {
-                let request = Self.scoped(
-                    FileRecord.filter(Column("status") == status.rawValue), to: rootIds
-                )
-                let count = try request.fetchCount(db)
-                if count > 0 {
-                    counts[status] = count
-                }
+            let rows = try Row.fetchAll(
+                db, sql: sql, arguments: Self.statementArguments(arguments, [])
+            )
+            for row in rows {
+                guard let status = FileStatus(rawValue: row["status"]) else { continue }
+                counts[status] = row["n"]
             }
             return counts
         }
@@ -532,16 +584,6 @@ public final class Store: Sendable {
                     count: row["n"], bytes: row["bytes"]
                 )
             }
-        }
-    }
-
-    /// Direct files of one directory, for the review file list.
-    public func files(inDirectory parentDir: String, rootId: Int64) throws -> [FileRecord] {
-        try writer.read { db in
-            try FileRecord
-                .filter(Column("root_id") == rootId && Column("parent_dir") == parentDir)
-                .order(Column("file_name"))
-                .fetchAll(db)
         }
     }
 
@@ -749,6 +791,22 @@ public final class Store: Sendable {
 
     public func serverURL() throws -> String {
         try setting(SettingsKey.serverURL) ?? Self.defaultServerURL
+    }
+
+    public func hashConcurrency() throws -> Int? {
+        try setting(SettingsKey.hashConcurrency).flatMap(Int.init)
+    }
+
+    public func setHashConcurrency(_ value: Int) throws {
+        try setSetting(SettingsKey.hashConcurrency, to: String(value))
+    }
+
+    public func uploadConcurrency() throws -> Int? {
+        try setting(SettingsKey.uploadConcurrency).flatMap(Int.init)
+    }
+
+    public func setUploadConcurrency(_ value: Int) throws {
+        try setSetting(SettingsKey.uploadConcurrency, to: String(value))
     }
 
     /// The most recent analysis run that finished cleanly — the run an upload

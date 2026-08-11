@@ -6,14 +6,20 @@ struct SettingsView: View {
     /// Draft of the key being typed; committed to the model (and Keychain)
     /// only on Save & Test, so the rest of the app never sees a partial key.
     @State private var apiKeyDraft = ""
+    /// Drafts of the server URL and target library; committed together on
+    /// Apply Server Settings so a run can never target an edited-but-
+    /// unapplied destination while the database still holds the old
+    /// destination's sync state.
+    @State private var serverURLDraft = ""
+    @State private var libraryDraft: String?
 
     var body: some View {
         @Bindable var model = model
         Form {
             Section("Server") {
-                TextField("Server URL", text: $model.serverURLString, prompt: Text(Store.defaultServerURL))
+                TextField("Server URL", text: $serverURLDraft, prompt: Text(Store.defaultServerURL))
                     .autocorrectionDisabled()
-                Picker("Library", selection: $model.selectedLibraryId) {
+                Picker("Library", selection: $libraryDraft) {
                     Text("Account default").tag(String?.none)
                     ForEach(model.libraries, id: \.id) { library in
                         Text(library.name).tag(Optional(library.id))
@@ -21,7 +27,9 @@ struct SettingsView: View {
                 }
                 LabeledContent("") {
                     Button("Apply Server Settings") {
-                        model.applyServerSettings()
+                        model.applyServerSettings(
+                            serverURL: serverURLDraft, libraryId: libraryDraft
+                        )
                     }
                     .disabled(model.isRunning)
                 }
@@ -37,17 +45,24 @@ struct SettingsView: View {
                 SecureField("API key", text: $apiKeyDraft, prompt: Text("apikey_…"))
                 LabeledContent("") {
                     HStack {
+                        // Saving/testing acts on the applied server; while the
+                        // URL draft differs, "Connected" would refer to a
+                        // different destination than the field shows.
                         if apiKeyDraft != model.apiKey {
                             Button("Save & Test") {
                                 model.apiKey = apiKeyDraft
                                 model.saveAPIKey()
                                 Task { await model.testConnection() }
                             }
-                            .disabled(apiKeyDraft.isEmpty)
+                            .disabled(
+                                apiKeyDraft.isEmpty
+                                    || serverURLDraft != model.serverURLString
+                            )
                         } else if !model.apiKey.isEmpty {
                             Button("Test") {
                                 Task { await model.testConnection() }
                             }
+                            .disabled(serverURLDraft != model.serverURLString)
                         }
                         connectionStatusView
                     }
@@ -73,8 +88,14 @@ struct SettingsView: View {
         }
         .formStyle(.grouped)
         .frame(width: 480)
-        .onAppear { apiKeyDraft = model.apiKey }
+        .onAppear {
+            apiKeyDraft = model.apiKey
+            serverURLDraft = model.serverURLString
+            libraryDraft = model.selectedLibraryId
+        }
         .onChange(of: model.apiKey) { apiKeyDraft = model.apiKey }
+        .onChange(of: model.serverURLString) { serverURLDraft = model.serverURLString }
+        .onChange(of: model.selectedLibraryId) { libraryDraft = model.selectedLibraryId }
         .onChange(of: model.hashConcurrency) { model.savePerformanceSettings() }
         .onChange(of: model.uploadConcurrency) { model.savePerformanceSettings() }
     }
