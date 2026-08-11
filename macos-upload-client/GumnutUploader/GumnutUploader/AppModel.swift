@@ -231,12 +231,23 @@ final class AppModel {
 
     // MARK: - Exclusions
 
+    /// Effective exclusion state, not exact-match: a child under an excluded
+    /// ancestor directory is excluded too, and its checkbox must say so or
+    /// the review UI would contradict the actual plan.
     func isDirectoryExcluded(_ relPath: String) -> Bool {
-        exclusions.contains { $0.kind == .directory && $0.relPath == relPath }
+        exclusions.contains { $0.kind == .directory && $0.covers(relPath: relPath) }
     }
 
     func isFileExcluded(_ relPath: String) -> Bool {
-        exclusions.contains { $0.kind == .file && $0.relPath == relPath }
+        exclusions.contains { $0.covers(relPath: relPath) }
+    }
+
+    /// Excluded by a covering ancestor directory rather than its own row —
+    /// the child's toggle can't change that; re-include the ancestor instead.
+    func isExcludedByAncestor(_ relPath: String) -> Bool {
+        exclusions.contains {
+            $0.kind == .directory && $0.relPath != relPath && $0.covers(relPath: relPath)
+        }
     }
 
     func setExcluded(kind: Exclusion.Kind, relPath: String, excluded: Bool) {
@@ -269,8 +280,11 @@ final class AppModel {
         // A different key may belong to a different account, whose library
         // holds none of what this one considers synced — and the reviewed
         // plan was approved against the old account. Same-account rotations
-        // pay only a cheap existence re-check (hashes are kept).
-        if !previous.isEmpty, previous != newKey {
+        // pay only a cheap existence re-check (hashes are kept). An empty
+        // previous key does NOT prove a fresh install — the Keychain entry
+        // can be lost while the database keeps a plan and synced rows — so
+        // persisted destination state also demands the reset.
+        if previous != newKey, !previous.isEmpty || hasPersistedDestinationState {
             lastAnalysis = nil
             lastUpload = nil
             libraries = []
@@ -396,6 +410,18 @@ final class AppModel {
             guard generation == connectionGeneration else { return }
             connectionStatus = .failed(Self.describe(error))
         }
+    }
+
+    /// Whether the database still holds state that is only meaningful for a
+    /// particular destination account: a reviewed plan or synced rows. A
+    /// read failure counts as "state may exist" — this gates a
+    /// data-integrity reset, so it must fail toward resetting.
+    private var hasPersistedDestinationState: Bool {
+        guard let store else { return false }
+        guard let planId = try? store.lastCompletedAnalysisRunId(),
+            let counts = try? store.statusCounts()
+        else { return true }
+        return planId != nil || (counts[.synced] ?? 0) > 0
     }
 
     private func makeClient() -> GumnutClient? {

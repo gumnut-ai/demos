@@ -179,8 +179,12 @@ struct DirectoryTreeView: View {
                 )
                 .toggleStyle(.checkbox)
                 .labelsHidden()
-                .help("Include this folder and everything inside it")
-                .disabled(model.isRunning)
+                .help(
+                    model.isExcludedByAncestor(node.id)
+                        ? "Excluded by a parent folder — include the parent to change this"
+                        : "Include this folder and everything inside it"
+                )
+                .disabled(model.isRunning || model.isExcludedByAncestor(node.id))
             }
         }
     }
@@ -277,8 +281,12 @@ struct FileListView: View {
                 )
                 .toggleStyle(.checkbox)
                 .labelsHidden()
-                .help("Include this file")
-                .disabled(model.isRunning)
+                .help(
+                    model.isExcludedByAncestor(file.relPath)
+                        ? "Excluded by a parent folder — include the parent to change this"
+                        : "Include this file"
+                )
+                .disabled(model.isRunning || model.isExcludedByAncestor(file.relPath))
             } else {
                 Color.clear.frame(width: 16, height: 16)
             }
