@@ -264,19 +264,28 @@ final class AppModel {
 
     // MARK: - Settings
 
-    func saveAPIKey(_ newKey: String) {
+    /// Returns whether the key was activated — callers should only test the
+    /// connection on success, or the status row would describe the old key
+    /// right after a failure alert.
+    @discardableResult
+    func saveAPIKey(_ newKey: String) -> Bool {
         // Same backstop as applyServerSettings/removeRoot: a key change
         // resets sync state, which must not land under a live engine.
         guard !isRunning else {
             alertMessage = "Wait for the current run to finish before changing the API key."
-            return
+            return false
+        }
+        // The new key becomes active only once it is persisted: an
+        // in-memory-only key would run this session against one account and
+        // reload the old key (over the new account's state) after restart.
+        guard KeychainStore.saveAPIKey(newKey, server: serverURLString) else {
+            alertMessage =
+                "Could not save the API key to the keychain. "
+                + "The previous key remains active."
+            return false
         }
         let previous = apiKey
         apiKey = newKey
-        let keychainSaved = KeychainStore.saveAPIKey(newKey, server: serverURLString)
-        if !keychainSaved {
-            alertMessage = "Could not save the API key to the keychain."
-        }
         // A different key may belong to a different account, whose library
         // holds none of what this one considers synced — and the reviewed
         // plan was approved against the old account. Same-account rotations
@@ -290,11 +299,9 @@ final class AppModel {
             libraries = []
             do {
                 try store?.resetDestinationSyncState()
-                if keychainSaved {
-                    alertMessage =
-                        "API key changed. Sync state was reset (file hashes kept) — "
-                        + "run Analyze to rebuild it for this account."
-                }
+                alertMessage =
+                    "API key changed. Sync state was reset (file hashes kept) — "
+                    + "run Analyze to rebuild it for this account."
             } catch {
                 alertMessage =
                     "Could not reset sync state for the new API key: "
@@ -304,6 +311,7 @@ final class AppModel {
         }
         connectionGeneration += 1
         connectionStatus = .unknown
+        return true
     }
 
     /// Validates and applies a server URL + target library. The applied
