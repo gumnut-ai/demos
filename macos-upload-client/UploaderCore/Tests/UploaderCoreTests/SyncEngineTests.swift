@@ -433,6 +433,65 @@ private func assetJSON(id: String, checksumB64: String) -> String {
         #expect(run.counters.toUpload == 0)
     }
 
+    @Test func uploadOnlyCoversRootsRecordedByTheAnalysis() async throws {
+        defer { EngineTestStub.reset() }
+        let env = try makeEnv()
+        try writeAged(env.dir, "a.jpg", "aaa")
+        installRoutes(env) { _ in
+            .json(200, #"{"assets": []}"#)
+        } upload: { _, _ in
+            .json(201, assetJSON(id: "asset_a", checksumB64: sha256B64("aaa")))
+        }
+
+        let engine = env.engine()
+        let analysis = try await engine.runAnalysis()
+
+        // A second root — included, reachable, with a cached hashed-pending
+        // file — appears after the review. The plan didn't cover it, so the
+        // upload must not touch it.
+        let otherDir = try TempDir()
+        try otherDir.write("late.jpg", Data("zzzz".utf8))
+        let other = try env.store.addRoot(path: otherDir.url.path)
+        let record = try env.store.recordScannedFile(
+            rootId: other.id!, relPath: "late.jpg", size: 4, mtime: 1,
+            classification: .image, excluded: false, scanId: nil
+        )
+        try env.store.markHashed(
+            record.id!, sha256: Data(SHA256.hash(data: Data("zzzz".utf8)))
+        )
+        // And the analyzed root is unchecked after review: its reviewed files
+        // must still upload — the plan, not the live flags, is the scope.
+        try env.store.setRootIncluded(env.root.id!, included: false)
+
+        let result = try await engine.runUpload(continuing: analysis.runId)
+
+        #expect(result.uploaded == 1)
+        #expect(env.bodies(for: "/api/assets").count == 1)
+        #expect(
+            try env.store.hashedPendingFiles(rootIds: [other.id!]).map(\.relPath)
+                == ["late.jpg"]
+        )
+    }
+
+    @Test func uploadThrowsWhenRunRootsAreUnreachable() async throws {
+        defer { EngineTestStub.reset() }
+        let env = try makeEnv()
+        try writeAged(env.dir, "a.jpg", "aaa")
+        installRoutes(env)
+
+        let engine = env.engine()
+        let analysis = try await engine.runAnalysis()
+
+        // The volume unmounts between review and clicking Upload: the run
+        // must fail loudly, not complete with zero uploads.
+        try FileManager.default.removeItem(at: env.dir.url)
+        await #expect(
+            throws: SyncEngineError.noReachableRoots(skippedPaths: [env.root.path])
+        ) {
+            _ = try await engine.runUpload(continuing: analysis.runId)
+        }
+    }
+
     @Test func uploadEmitsPerFileLifecycleEvents() async throws {
         defer { EngineTestStub.reset() }
         let env = try makeEnv()

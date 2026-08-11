@@ -487,6 +487,23 @@ import Testing
         #expect(Store.parentDirectory(of: "x/y/a.jpg") == "x/y")
     }
 
+    @Test func updateRootPathPersistsAndGuardsCollisions() throws {
+        let store = try Store.inMemory()
+        let a = try store.addRoot(path: "/photos/a")
+        _ = try store.addRoot(path: "/photos/b")
+
+        #expect(try store.updateRootPath(a.id!, path: "/photos/a-moved/") == true)
+        #expect(try store.allRoots().map(\.path) == ["/photos/a-moved", "/photos/b"])
+
+        // Overlap with another root leaves the row unchanged.
+        #expect(try store.updateRootPath(a.id!, path: "/photos/b") == false)
+        #expect(try store.updateRootPath(a.id!, path: "/photos/b/sub") == false)
+        #expect(try store.allRoots().map(\.path) == ["/photos/a-moved", "/photos/b"])
+
+        // Unchanged path is a successful no-op.
+        #expect(try store.updateRootPath(a.id!, path: "/photos/a-moved") == true)
+    }
+
     @Test func addRootRejectsSymlinkAliasOfExistingRoot() throws {
         let store = try Store.inMemory()
         let dir = try TempDir()

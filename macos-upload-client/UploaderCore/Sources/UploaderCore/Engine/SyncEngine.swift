@@ -191,6 +191,11 @@ public actor SyncEngine {
                 }
             }
             let rootIds = stillReachable.compactMap(\.id)
+            // A root that vanished mid-scan was not analyzed: narrow the run's
+            // recorded set so a later upload of this plan cannot include it.
+            if stillReachable.count != reachable.count {
+                try store.updateRunRootIds(runId, rootIds: rootIds)
+            }
 
             try await hashPhase(roots: stillReachable)
             try Task.checkCancellation()
@@ -427,8 +432,29 @@ public actor SyncEngine {
         guard let run = try store.run(id: runId) else {
             throw SyncEngineError.runNotFound(runId)
         }
-        let roots = try store.allRoots().filter {
-            $0.included && reader.directoryExists(atPath: $0.path)
+        // The reviewed plan is authoritative: upload exactly the roots the
+        // analysis covered, not whatever is included in the sidebar now — a
+        // root toggled on after review must not upload unreviewed files, and
+        // one toggled off must not silently drop reviewed ones.
+        let runRootIds = Set(run.rootIds)
+        let runRoots = try store.allRoots().filter { root in
+            root.id.map(runRootIds.contains) ?? false
+        }
+        var roots: [Root] = []
+        for root in runRoots {
+            if reader.directoryExists(atPath: root.path) {
+                roots.append(root)
+            } else {
+                emit(
+                    .fileIssue(
+                        relPath: root.path,
+                        message: "root became unreachable; its reviewed files were not uploaded"
+                    )
+                )
+            }
+        }
+        guard !roots.isEmpty else {
+            throw SyncEngineError.noReachableRoots(skippedPaths: runRoots.map(\.path))
         }
         let rootIds = roots.compactMap(\.id)
         let rootsById = Dictionary(

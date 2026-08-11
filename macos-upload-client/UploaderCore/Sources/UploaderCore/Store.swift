@@ -146,6 +146,38 @@ public final class Store: Sendable {
         }
     }
 
+    /// Updates a root's stored path after its security-scoped bookmark
+    /// resolved somewhere else (folder moved or renamed, volume remounted).
+    /// File rows are unaffected — rel_paths stay anchored to the root. The
+    /// same overlap rule as `addRoot` applies; a collision with another
+    /// root's path leaves the row unchanged and returns false.
+    @discardableResult
+    public func updateRootPath(_ rootId: Int64, path rawPath: String) throws -> Bool {
+        let path = FileReader.canonicalPath(of: Self.normalize(path: rawPath))
+        return try writer.write { db in
+            let current = try String.fetchOne(
+                db, sql: "SELECT path FROM roots WHERE id = ?", arguments: [rootId]
+            )
+            guard current != path else { return true }
+            let others = try String.fetchAll(
+                db, sql: "SELECT path FROM roots WHERE id <> ?", arguments: [rootId]
+            )
+            for other in others {
+                if path == other
+                    || path.hasPrefix(other + "/")
+                    || other.hasPrefix(path + "/")
+                {
+                    return false
+                }
+            }
+            try db.execute(
+                sql: "UPDATE roots SET path = ? WHERE id = ?",
+                arguments: [path, rootId]
+            )
+            return true
+        }
+    }
+
     /// Refreshes a root's security-scoped bookmark (e.g. after staleness).
     public func updateRootBookmark(_ rootId: Int64, bookmark: Data) throws {
         try writer.write { db in
@@ -737,6 +769,17 @@ public final class Store: Sendable {
             )
             try run.insert(db)
             return run
+        }
+    }
+
+    /// Narrows a run's recorded root set (e.g. after a root vanished
+    /// mid-scan), so upload scoping reflects what was actually analyzed.
+    public func updateRunRootIds(_ runId: Int64, rootIds: [Int64]) throws {
+        try writer.write { db in
+            try db.execute(
+                sql: "UPDATE runs SET root_ids_json = ? WHERE id = ?",
+                arguments: [Self.encodeJSON(rootIds), runId]
+            )
         }
     }
 

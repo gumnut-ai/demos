@@ -357,7 +357,13 @@ final class AppModel {
             alertMessage = "Run Analyze first — uploads always follow a reviewed plan."
             return
         }
-        startRun { engine in
+        // The upload covers the run's recorded roots regardless of the live
+        // included flags, so sandbox access must too — a root unchecked after
+        // review would otherwise be unreadable and silently dropped.
+        let runRootIds = ((try? store?.run(id: runId))?.map(\.rootIds)).map(Set.init)
+        startRun(accessing: { root in
+            runRootIds.map { root.id.map($0.contains) ?? false } ?? root.included
+        }) { engine in
             let result = try await engine.runUpload(continuing: runId)
             await MainActor.run {
                 self.lastUpload = result
@@ -374,7 +380,10 @@ final class AppModel {
         runTask?.cancel()
     }
 
-    private func startRun(_ operation: @escaping @Sendable (SyncEngine) async throws -> Void) {
+    private func startRun(
+        accessing selection: ((Root) -> Bool)? = nil,
+        _ operation: @escaping @Sendable (SyncEngine) async throws -> Void
+    ) {
         guard !isRunning, let store else { return }
         guard let client = makeClient() else {
             alertMessage = "Set the server URL and API key in Settings first."
@@ -400,7 +409,7 @@ final class AppModel {
             options: [.userInitiated, .idleSystemSleepDisabled],
             reason: "Syncing photos to Gumnut"
         )
-        let accessedURLs = startAccessingIncludedRoots()
+        let accessedURLs = startAccessingRoots(selection ?? { $0.included })
 
         runTask = Task {
             do {
@@ -425,11 +434,11 @@ final class AppModel {
         }
     }
 
-    /// Resolves security-scoped bookmarks for included roots, refreshing any
-    /// stale ones. Returns the URLs that must be released after the run.
-    private func startAccessingIncludedRoots() -> [URL] {
+    /// Resolves security-scoped bookmarks for the selected roots, refreshing
+    /// any stale ones. Returns the URLs that must be released after the run.
+    private func startAccessingRoots(_ selection: (Root) -> Bool) -> [URL] {
         var accessed: [URL] = []
-        for root in roots where root.included {
+        for root in roots where selection(root) {
             guard let bookmark = root.bookmark else { continue }
             var isStale = false
             guard
@@ -443,6 +452,19 @@ final class AppModel {
             }
             if url.startAccessingSecurityScopedResource() {
                 accessed.append(url)
+            }
+            // The bookmark tracks moves, renames, and remounts; keep the
+            // stored path pointing where it actually resolved so preflight
+            // probes the real location instead of a stale one. (updateRootPath
+            // canonicalizes and no-ops when unchanged or colliding.)
+            if url.path != root.path, let id = root.id {
+                let updated = (try? store?.updateRootPath(id, path: url.path)) ?? false
+                if updated != true {
+                    issues.append(
+                        "Folder moved to \(url.path), which overlaps another added "
+                            + "folder — remove and re-add it."
+                    )
+                }
             }
             if isStale, let id = root.id,
                 let fresh = try? url.bookmarkData(
