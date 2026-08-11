@@ -50,13 +50,13 @@ struct SettingsView: View {
                         // different destination than the field shows.
                         if apiKeyDraft != model.apiKey {
                             Button("Save & Test") {
-                                model.apiKey = apiKeyDraft
-                                model.saveAPIKey()
+                                model.saveAPIKey(apiKeyDraft)
                                 Task { await model.testConnection() }
                             }
                             .disabled(
                                 apiKeyDraft.isEmpty
                                     || serverURLDraft != model.serverURLString
+                                    || model.isRunning
                             )
                         } else if !model.apiKey.isEmpty {
                             Button("Test") {

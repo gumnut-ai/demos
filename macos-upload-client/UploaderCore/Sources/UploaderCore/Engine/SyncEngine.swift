@@ -10,12 +10,14 @@ public enum SyncEvent: Sendable, Equatable {
     case hashProgress(hashedFiles: Int, totalFiles: Int, hashedBytes: Int64, totalBytes: Int64)
     case checkProgress(checked: Int, matched: Int)
     case uploadProgress(completed: Int, total: Int, bytesUploaded: Int64)
-    /// Per-file upload lifecycle, for live "what's in flight" UI. `path` is
-    /// the absolute path (for thumbnails); `bytesTotal` in progress events is
-    /// the encoded request body, slightly larger than the file itself.
-    case uploadFileStarted(relPath: String, path: String, bytesTotal: Int64)
-    case uploadFileProgress(relPath: String, bytesSent: Int64, bytesTotal: Int64)
-    case uploadFileFinished(relPath: String)
+    /// Per-file upload lifecycle, for live "what's in flight" UI. `fileId`
+    /// is the file row's unique id — two roots can hold the same relative
+    /// path, so `relPath` alone is not an identity. `path` is the absolute
+    /// path (for thumbnails); `bytesTotal` in progress events is the encoded
+    /// request body, slightly larger than the file itself.
+    case uploadFileStarted(fileId: Int64, relPath: String, path: String, bytesTotal: Int64)
+    case uploadFileProgress(fileId: Int64, relPath: String, bytesSent: Int64, bytesTotal: Int64)
+    case uploadFileFinished(fileId: Int64, relPath: String)
     case fileIssue(relPath: String, message: String)
 }
 
@@ -568,8 +570,13 @@ public actor SyncEngine {
         let modified = times?.modified ?? Date(timeIntervalSince1970: file.mtime)
         let created = times?.created ?? modified
 
-        emit(.uploadFileStarted(relPath: file.relPath, path: fileURL.path, bytesTotal: file.size))
-        defer { emit(.uploadFileFinished(relPath: file.relPath)) }
+        let fileId = file.id!
+        emit(
+            .uploadFileStarted(
+                fileId: fileId, relPath: file.relPath, path: fileURL.path, bytesTotal: file.size
+            )
+        )
+        defer { emit(.uploadFileFinished(fileId: fileId, relPath: file.relPath)) }
         // URLSession reports every body chunk; forward at most a few per
         // second (plus the final one) so the UI isn't flooded.
         let relPath = file.relPath
@@ -577,7 +584,9 @@ public actor SyncEngine {
         let onProgress: @Sendable (Int64, Int64) -> Void = { sent, total in
             if sent >= total || progressGate.shouldEmit(interval: 0.25) {
                 self.emit(
-                    .uploadFileProgress(relPath: relPath, bytesSent: sent, bytesTotal: total)
+                    .uploadFileProgress(
+                        fileId: fileId, relPath: relPath, bytesSent: sent, bytesTotal: total
+                    )
                 )
             }
         }

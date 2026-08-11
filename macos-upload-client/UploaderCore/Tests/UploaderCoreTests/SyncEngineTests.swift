@@ -596,7 +596,7 @@ private func assetJSON(id: String, checksumB64: String) -> String {
         let events = env.events.items
         let startedIndex = try #require(
             events.firstIndex {
-                if case .uploadFileStarted(let relPath, let path, let bytesTotal) = $0 {
+                if case .uploadFileStarted(_, let relPath, let path, let bytesTotal) = $0 {
                     return relPath == "sub/b.jpg" && path.hasSuffix("/sub/b.jpg")
                         && bytesTotal == 4
                 }
@@ -605,11 +605,53 @@ private func assetJSON(id: String, checksumB64: String) -> String {
         )
         let finishedIndex = try #require(
             events.firstIndex {
-                if case .uploadFileFinished(let relPath) = $0 { return relPath == "sub/b.jpg" }
+                if case .uploadFileFinished(_, let relPath) = $0 {
+                    return relPath == "sub/b.jpg"
+                }
                 return false
             }
         )
         #expect(startedIndex < finishedIndex)
+    }
+
+    @Test func uploadEventsIdentifyFilesAcrossRootsWithSameRelPath() async throws {
+        defer { EngineTestStub.reset() }
+        let env = try makeEnv()
+        try writeAged(env.dir, "IMG_0001.jpg", "aaa")
+        let secondDir = try TempDir()
+        try FileManager.default.setAttributes(
+            [.modificationDate: Date().addingTimeInterval(-3600)],
+            ofItemAtPath: secondDir.write("IMG_0001.jpg", Data("bbbb".utf8)).path
+        )
+        try env.store.addRoot(path: secondDir.url.path)
+        installRoutes(env) { _ in
+            .json(200, #"{"assets": []}"#)
+        } upload: { _, body in
+            if let body, body.range(of: Data("bbbb".utf8)) != nil {
+                return .json(201, assetJSON(id: "asset_2", checksumB64: sha256B64("bbbb")))
+            }
+            return .json(201, assetJSON(id: "asset_1", checksumB64: sha256B64("aaa")))
+        }
+
+        let engine = env.engine { $0.uploadConcurrency = 1 }
+        let analysis = try await engine.runAnalysis()
+        let result = try await engine.runUpload(continuing: analysis.runId)
+
+        // Same relative path under two roots: lifecycle events must carry
+        // distinct file identities so the UI can pair start/finish correctly.
+        #expect(result.uploaded == 2)
+        let started: [(id: Int64, relPath: String)] = env.events.items.compactMap { event in
+            if case .uploadFileStarted(let id, let rel, _, _) = event { return (id, rel) }
+            return nil
+        }
+        #expect(started.count == 2)
+        #expect(started.allSatisfy { $0.relPath == "IMG_0001.jpg" })
+        #expect(Set(started.map(\.id)).count == 2)
+        let finished: [Int64] = env.events.items.compactMap { event in
+            if case .uploadFileFinished(let id, _) = event { return id }
+            return nil
+        }
+        #expect(Set(finished) == Set(started.map(\.id)))
     }
 
     @Test func uploadFirewallBlockMarksErrorAndContinues() async throws {

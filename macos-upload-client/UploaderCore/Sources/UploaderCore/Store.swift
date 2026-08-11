@@ -913,28 +913,36 @@ public final class Store: Sendable {
         let changed = serverURL != currentServer || libraryId != currentLibrary
 
         if changed {
-            try writer.write { db in
-                // Destination-specific fields are cleared on EVERY row that
-                // holds one — an excluded (or errored) row keeps its status
-                // but must not carry the old destination's asset id, or
-                // un-excluding it later would restore it straight to synced.
-                try db.execute(
-                    sql: """
-                        UPDATE files SET
-                            status = CASE WHEN status = ? THEN ? ELSE status END,
-                            asset_id = NULL, synced_at = NULL
-                        WHERE status = ? OR asset_id IS NOT NULL
-                        """,
-                    arguments: [
-                        FileStatus.synced.rawValue, FileStatus.pending.rawValue,
-                        FileStatus.synced.rawValue,
-                    ]
-                )
-            }
-            try setLastCompletedAnalysisRunId(nil)
+            try resetDestinationSyncState()
         }
         try setSetting(SettingsKey.serverURL, to: serverURL)
         try setSetting(SettingsKey.libraryId, to: libraryId)
         return changed
+    }
+
+    /// Clears destination-specific sync state — synced statuses, asset IDs,
+    /// and the reviewed plan. Hashes are kept; the next analysis rebuilds
+    /// cheaply via the existence check. Also used when the API key changes to
+    /// a different value, since a new key may belong to a different account.
+    public func resetDestinationSyncState() throws {
+        try writer.write { db in
+            // Destination-specific fields are cleared on EVERY row that
+            // holds one — an excluded (or errored) row keeps its status
+            // but must not carry the old destination's asset id, or
+            // un-excluding it later would restore it straight to synced.
+            try db.execute(
+                sql: """
+                    UPDATE files SET
+                        status = CASE WHEN status = ? THEN ? ELSE status END,
+                        asset_id = NULL, synced_at = NULL
+                    WHERE status = ? OR asset_id IS NOT NULL
+                    """,
+                arguments: [
+                    FileStatus.synced.rawValue, FileStatus.pending.rawValue,
+                    FileStatus.synced.rawValue,
+                ]
+            )
+        }
+        try setLastCompletedAnalysisRunId(nil)
     }
 }

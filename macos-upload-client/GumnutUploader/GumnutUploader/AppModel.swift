@@ -24,6 +24,10 @@ final class AppModel {
         case failed(String)
     }
     private(set) var connectionStatus: ConnectionStatus = .unknown
+    /// Bumped whenever the applied destination (server or key) changes, so a
+    /// connection test that was in flight against the old destination can
+    /// recognize itself as stale and discard its results.
+    private var connectionGeneration = 0
 
     // MARK: Library state
 
@@ -54,14 +58,15 @@ final class AppModel {
     private(set) var lastUpload: UploadResult?
     var alertMessage: String?
 
-    /// One file currently in flight, for the Details popover.
+    /// One file currently in flight, for the Details popover. Identified by
+    /// the file row's id — two roots can hold the same relative path.
     struct ActiveUpload: Identifiable, Equatable {
+        let id: Int64
         let relPath: String
         let fileURL: URL
         var bytesSent: Int64 = 0
         var bytesTotal: Int64
 
-        var id: String { relPath }
         var fileName: String { (relPath as NSString).lastPathComponent }
         var fraction: Double? {
             bytesTotal > 0 ? min(1, Double(bytesSent) / Double(bytesTotal)) : nil
@@ -248,10 +253,42 @@ final class AppModel {
 
     // MARK: - Settings
 
-    func saveAPIKey() {
-        if !KeychainStore.saveAPIKey(apiKey, server: serverURLString) {
+    func saveAPIKey(_ newKey: String) {
+        // Same backstop as applyServerSettings/removeRoot: a key change
+        // resets sync state, which must not land under a live engine.
+        guard !isRunning else {
+            alertMessage = "Wait for the current run to finish before changing the API key."
+            return
+        }
+        let previous = apiKey
+        apiKey = newKey
+        let keychainSaved = KeychainStore.saveAPIKey(newKey, server: serverURLString)
+        if !keychainSaved {
             alertMessage = "Could not save the API key to the keychain."
         }
+        // A different key may belong to a different account, whose library
+        // holds none of what this one considers synced — and the reviewed
+        // plan was approved against the old account. Same-account rotations
+        // pay only a cheap existence re-check (hashes are kept).
+        if !previous.isEmpty, previous != newKey {
+            lastAnalysis = nil
+            lastUpload = nil
+            libraries = []
+            do {
+                try store?.resetDestinationSyncState()
+                if keychainSaved {
+                    alertMessage =
+                        "API key changed. Sync state was reset (file hashes kept) — "
+                        + "run Analyze to rebuild it for this account."
+                }
+            } catch {
+                alertMessage =
+                    "Could not reset sync state for the new API key: "
+                    + error.localizedDescription
+            }
+            refresh()
+        }
+        connectionGeneration += 1
         connectionStatus = .unknown
     }
 
@@ -300,6 +337,7 @@ final class AppModel {
                     "Server or library changed. Sync state was reset (file hashes kept) — "
                     + "run Analyze to rebuild it against the new destination."
             }
+            connectionGeneration += 1
             connectionStatus = .unknown
             refresh()
         } catch {
@@ -328,20 +366,34 @@ final class AppModel {
             connectionStatus = .failed("Enter a server URL and API key first.")
             return
         }
+        let generation = connectionGeneration
         connectionStatus = .testing
         do {
             let user = try await client.currentUser()
+            var loadedLibraries: [GumnutLibrary]?
+            var libraryError: (any Error)?
             do {
-                libraries = try await client.libraries()
+                loadedLibraries = try await client.libraries()
             } catch {
+                libraryError = error
+            }
+            // The destination changed while this test was in flight: these
+            // results describe the OLD server/key — discard them, or the
+            // picker would fill with another destination's libraries.
+            guard generation == connectionGeneration else { return }
+            if let loadedLibraries {
+                libraries = loadedLibraries
+            }
+            if let libraryError {
                 // The key works but the picker would be silently empty — say
                 // why, instead of looking like an account with no libraries.
                 alertMessage =
                     "Connected, but the library list could not be loaded: "
-                    + Self.describe(error)
+                    + Self.describe(libraryError)
             }
             connectionStatus = .ok(userId: user.id)
         } catch {
+            guard generation == connectionGeneration else { return }
             connectionStatus = .failed(Self.describe(error))
         }
     }
@@ -556,14 +608,15 @@ final class AppModel {
                 "Uploading \(completed.formatted()) of \(total.formatted()) "
                 + "(\(Self.bytesText(bytes)))"
             scheduleLiveRefresh()
-        case .uploadFileStarted(let relPath, let path, let bytesTotal):
+        case .uploadFileStarted(let fileId, let relPath, let path, let bytesTotal):
             activeUploads.append(
                 ActiveUpload(
-                    relPath: relPath, fileURL: URL(fileURLWithPath: path), bytesTotal: bytesTotal
+                    id: fileId, relPath: relPath,
+                    fileURL: URL(fileURLWithPath: path), bytesTotal: bytesTotal
                 )
             )
-        case .uploadFileProgress(let relPath, let bytesSent, let bytesTotal):
-            if let index = activeUploads.firstIndex(where: { $0.relPath == relPath }) {
+        case .uploadFileProgress(let fileId, _, let bytesSent, let bytesTotal):
+            if let index = activeUploads.firstIndex(where: { $0.id == fileId }) {
                 // A retried upload restarts its byte count; don't let the
                 // negative delta corrupt the speed window.
                 let delta = bytesSent - activeUploads[index].bytesSent
@@ -571,8 +624,8 @@ final class AppModel {
                 activeUploads[index].bytesSent = bytesSent
                 activeUploads[index].bytesTotal = bytesTotal
             }
-        case .uploadFileFinished(let relPath):
-            activeUploads.removeAll { $0.relPath == relPath }
+        case .uploadFileFinished(let fileId, _):
+            activeUploads.removeAll { $0.id == fileId }
         case .fileIssue(let relPath, let message):
             issues.append("\(relPath): \(message)")
             if issues.count > 200 {
