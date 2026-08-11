@@ -40,6 +40,10 @@ public enum SyncEngineError: Error, Equatable {
     /// Every included root was unreachable (e.g. NAS unmounted). Nothing was
     /// scanned and no state was touched.
     case noReachableRoots(skippedPaths: [String])
+    /// One or more roots of the reviewed plan are unreachable at upload time.
+    /// Nothing was uploaded — a partial upload recorded as completed would
+    /// break the review-before-upload guarantee.
+    case unreachableRunRoots(paths: [String])
     case runNotFound(Int64)
 }
 
@@ -435,26 +439,18 @@ public actor SyncEngine {
         // The reviewed plan is authoritative: upload exactly the roots the
         // analysis covered, not whatever is included in the sidebar now — a
         // root toggled on after review must not upload unreviewed files, and
-        // one toggled off must not silently drop reviewed ones.
+        // one toggled off must not silently drop reviewed ones. All of the
+        // plan's roots still on record must be reachable before anything is
+        // sent: a partial upload recorded as completed would leave approved
+        // files behind silently. (A root the user *removed* after review is
+        // gone from tracking entirely — deliberate, not a reachability gap.)
         let runRootIds = Set(run.rootIds)
-        let runRoots = try store.allRoots().filter { root in
+        let roots = try store.allRoots().filter { root in
             root.id.map(runRootIds.contains) ?? false
         }
-        var roots: [Root] = []
-        for root in runRoots {
-            if reader.directoryExists(atPath: root.path) {
-                roots.append(root)
-            } else {
-                emit(
-                    .fileIssue(
-                        relPath: root.path,
-                        message: "root became unreachable; its reviewed files were not uploaded"
-                    )
-                )
-            }
-        }
-        guard !roots.isEmpty else {
-            throw SyncEngineError.noReachableRoots(skippedPaths: runRoots.map(\.path))
+        let unreachable = roots.filter { !reader.directoryExists(atPath: $0.path) }
+        guard unreachable.isEmpty else {
+            throw SyncEngineError.unreachableRunRoots(paths: unreachable.map(\.path))
         }
         let rootIds = roots.compactMap(\.id)
         let rootsById = Dictionary(
@@ -584,7 +580,8 @@ public actor SyncEngine {
             let (outcome, asset) = try await Self.uploadWithRetry(
                 client: client, fileURL: fileURL, fileName: file.fileName,
                 deviceAssetId: "\(root.uuid):\(file.relPath)", deviceId: deviceId,
-                createdAt: created, modifiedAt: modified, libraryId: libraryId, config: config,
+                createdAt: created, modifiedAt: modified, libraryId: libraryId,
+                expectedSHA256: file.sha256, config: config,
                 onProgress: onProgress
             )
             if let serverChecksum = asset.fileData?.checksum,
@@ -644,6 +641,19 @@ public actor SyncEngine {
                 try? store.markError(file.id!, message: detail)
                 uploadResult.failed += 1
                 emit(.fileIssue(relPath: file.relPath, message: detail))
+            case .stagedFileChanged:
+                // The bytes changed while (size, mtime) stayed identical —
+                // the stat-keyed hash cache can't see it, so re-recording the
+                // scan would keep the stale hash. Invalidate the cache
+                // instead; the next analysis re-hashes from scratch.
+                try? store.invalidateCachedHash(file.id!)
+                uploadResult.skippedChanged += 1
+                emit(
+                    .fileIssue(
+                        relPath: file.relPath,
+                        message: "changed during upload staging; re-analyze to upload"
+                    )
+                )
             case .invalidRequest(let statusCode, let message) where statusCode == 422:
                 try? store.markSkippedUnsupported(file.id!, message: message)
                 uploadResult.skippedUnsupported += 1
@@ -678,6 +688,7 @@ public actor SyncEngine {
         client: GumnutClient, fileURL: URL, fileName: String,
         deviceAssetId: String, deviceId: String,
         createdAt: Date, modifiedAt: Date, libraryId: String?,
+        expectedSHA256: Data?,
         config: SyncEngineConfiguration,
         onProgress: (@Sendable (Int64, Int64) -> Void)? = nil
     ) async throws -> (outcome: UploadOutcome, asset: GumnutAsset) {
@@ -689,6 +700,7 @@ public actor SyncEngine {
                     fileURL: fileURL, fileName: fileName,
                     deviceAssetId: deviceAssetId, deviceId: deviceId,
                     fileCreatedAt: createdAt, fileModifiedAt: modifiedAt, libraryId: libraryId,
+                    expectedSHA256: expectedSHA256,
                     onProgress: onProgress
                 )
             } catch {

@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 
 /// Minimal multipart/form-data encoder. File contents are streamed in chunks,
@@ -47,12 +48,17 @@ public struct MultipartFormData: Sendable {
     }
 
     /// Streams the encoded body to `destination` (a staging file inside the
-    /// app's own container — user files are never written).
-    public func writeEncoded(to destination: URL, bufferSize: Int = 1 << 20) throws {
+    /// app's own container — user files are never written). Returns the
+    /// SHA-256 of the file-segment bytes as staged, so callers can verify the
+    /// body contains exactly the content they analyzed — the file may have
+    /// changed between their integrity checks and this read.
+    @discardableResult
+    public func writeEncoded(to destination: URL, bufferSize: Int = 1 << 20) throws -> Data {
         FileManager.default.createFile(atPath: destination.path, contents: nil)
         let output = try FileHandle(forWritingTo: destination)
         defer { try? output.close() }
 
+        var fileHasher = SHA256()
         for segment in segments {
             switch segment {
             case .data(let data):
@@ -63,11 +69,13 @@ public struct MultipartFormData: Sendable {
                 while true {
                     let chunk = try autoreleasepool { try input.read(upToCount: bufferSize) }
                     guard let chunk, !chunk.isEmpty else { break }
+                    fileHasher.update(data: chunk)
                     try output.write(contentsOf: chunk)
                 }
             }
         }
         try output.write(contentsOf: terminator)
+        return Data(fileHasher.finalize())
     }
 
     /// In-memory encoding for small bodies and tests.

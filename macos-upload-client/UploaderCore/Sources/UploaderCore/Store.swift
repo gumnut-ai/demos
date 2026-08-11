@@ -422,6 +422,22 @@ public final class Store: Sendable {
         return request.filter(rootIds.contains(Column("root_id")))
     }
 
+    /// Drops a row's cached hash and destination state so the next analysis
+    /// re-hashes it — for a file whose bytes changed while its (size, mtime)
+    /// stayed identical, which the stat-keyed hash cache cannot detect.
+    public func invalidateCachedHash(_ fileId: Int64) throws {
+        try writer.write { db in
+            try db.execute(
+                sql: """
+                    UPDATE files SET sha256 = NULL, hashed_at = NULL,
+                        asset_id = NULL, synced_at = NULL, status = ?, error_message = NULL
+                    WHERE id = ?
+                    """,
+                arguments: [FileStatus.pending.rawValue, fileId]
+            )
+        }
+    }
+
     public func markHashed(_ fileId: Int64, sha256: Data) throws {
         try writer.write { db in
             try db.execute(
@@ -898,12 +914,21 @@ public final class Store: Sendable {
 
         if changed {
             try writer.write { db in
+                // Destination-specific fields are cleared on EVERY row that
+                // holds one — an excluded (or errored) row keeps its status
+                // but must not carry the old destination's asset id, or
+                // un-excluding it later would restore it straight to synced.
                 try db.execute(
                     sql: """
-                        UPDATE files SET status = ?, asset_id = NULL, synced_at = NULL
-                        WHERE status = ?
+                        UPDATE files SET
+                            status = CASE WHEN status = ? THEN ? ELSE status END,
+                            asset_id = NULL, synced_at = NULL
+                        WHERE status = ? OR asset_id IS NOT NULL
                         """,
-                    arguments: [FileStatus.pending.rawValue, FileStatus.synced.rawValue]
+                    arguments: [
+                        FileStatus.synced.rawValue, FileStatus.pending.rawValue,
+                        FileStatus.synced.rawValue,
+                    ]
                 )
             }
             try setLastCompletedAnalysisRunId(nil)

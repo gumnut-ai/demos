@@ -90,8 +90,10 @@ made in Gumnut.
 4. **Idempotent uploads** (server contract, above): a crash, retry, or
    double-run can waste bandwidth but can never create duplicates.
 5. **Unreachable ≠ deleted.** If a root folder doesn't resolve (NAS
-   unmounted), that root is skipped for the run with a clear message.
-   Local state is never expired because a volume was offline.
+   unmounted), an analysis run skips that root with a clear message; an
+   upload run aborts entirely — a reviewed plan uploads all of its
+   roots or nothing, never a silent subset. Local state is never
+   expired because a volume was offline.
 
 ## Architecture
 
@@ -201,6 +203,11 @@ user-authored state.
    `file_modified_at` from filesystem stats (the service extracts EXIF
    itself), a stable `device_asset_id` (root UUID + relative path),
    and a per-install `device_id`. Response handling:
+   - Before sending, the staged request body's file bytes are hashed
+     and compared against the analyzed digest — a file whose bytes
+     changed without moving its (size, mtime) is refused rather than
+     uploaded unreviewed, and its hash cache is invalidated for
+     re-analysis.
    - `201` → uploaded; `200` → already existed (record the asset ID
      either way). Compare the returned checksum against ours as a free
      integrity check.

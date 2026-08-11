@@ -60,4 +60,8 @@ public enum GumnutClientError: Error, Equatable {
     case server(statusCode: Int, message: String?)
     case invalidResponse(String)
     case tooManyChecksums(count: Int, max: Int)
+    /// The staged upload body's file bytes hash differently than the caller's
+    /// expected digest — the file changed between analysis and staging. The
+    /// body was never sent.
+    case stagedFileChanged
 }

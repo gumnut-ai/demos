@@ -487,6 +487,26 @@ import Testing
         #expect(Store.parentDirectory(of: "x/y/a.jpg") == "x/y")
     }
 
+    @Test func serverChangeClearsAssetIdsFromExcludedRows() throws {
+        let store = try Store.inMemory()
+        let root = try store.addRoot(path: "/photos")
+        let record = try store.recordScannedFile(
+            rootId: root.id!, relPath: "a.jpg", size: 1, mtime: 1,
+            classification: .image, excluded: false, scanId: nil
+        )
+        try store.markUploaded(record.id!, assetId: "asset_old")
+        try store.setExcluded(rootId: root.id!, kind: .file, relPath: "a.jpg", excluded: true)
+
+        try store.updateServerConfiguration(serverURL: "https://other.example", libraryId: nil)
+
+        // Un-excluding after a destination switch must NOT restore the row to
+        // synced off the old destination's asset id.
+        try store.setExcluded(rootId: root.id!, kind: .file, relPath: "a.jpg", excluded: false)
+        let row = try store.files(underDirectory: "", rootId: root.id!).files[0]
+        #expect(row.status == .pending)
+        #expect(row.assetId == nil)
+    }
+
     @Test func updateRootPathPersistsAndGuardsCollisions() throws {
         let store = try Store.inMemory()
         let a = try store.addRoot(path: "/photos/a")

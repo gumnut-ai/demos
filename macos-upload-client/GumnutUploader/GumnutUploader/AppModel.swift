@@ -110,7 +110,14 @@ final class AppModel {
                 selectedRootId = roots.first?.id
             }
             counts = try store.statusCounts()
-            let totals = try store.pendingUploadTotals()
+            // The upload button's promise must match what runUpload will
+            // actually send: scope pending totals to the reviewed run's roots
+            // when a plan exists (cached pending files under other roots are
+            // not part of it).
+            let planRunId =
+                lastAnalysis?.runId ?? ((try? store.lastCompletedAnalysisRunId()) ?? nil)
+            let planRun = planRunId.flatMap { ((try? store.run(id: $0)) ?? nil) }
+            let totals = try store.pendingUploadTotals(rootIds: planRun?.rootIds)
             pendingFiles = totals.files
             pendingBytes = totals.bytes
             runs = try store.latestRuns(limit: 100)
@@ -589,6 +596,10 @@ final class AppModel {
             case .noReachableRoots(let paths):
                 return "No included folder is reachable right now (is the volume mounted?): "
                     + paths.joined(separator: ", ")
+            case .unreachableRunRoots(let paths):
+                return "Some folders from the reviewed plan aren't reachable right now "
+                    + "(is the volume mounted?): " + paths.joined(separator: ", ")
+                    + ". Nothing was uploaded — reconnect the volume or run Analyze again."
             case .runNotFound:
                 return "The analysis this upload was based on is gone. Run Analyze again."
             }

@@ -486,10 +486,95 @@ private func assetJSON(id: String, checksumB64: String) -> String {
         // must fail loudly, not complete with zero uploads.
         try FileManager.default.removeItem(at: env.dir.url)
         await #expect(
-            throws: SyncEngineError.noReachableRoots(skippedPaths: [env.root.path])
+            throws: SyncEngineError.unreachableRunRoots(paths: [env.root.path])
         ) {
             _ = try await engine.runUpload(continuing: analysis.runId)
         }
+    }
+
+    @Test func uploadAbortsWhenAnyRunRootIsUnreachable() async throws {
+        defer { EngineTestStub.reset() }
+        let env = try makeEnv()
+        try writeAged(env.dir, "a.jpg", "aaa")
+        let secondDir = try TempDir()
+        try FileManager.default.setAttributes(
+            [.modificationDate: Date().addingTimeInterval(-3600)],
+            ofItemAtPath: secondDir.write("b.jpg", Data("bbbb".utf8)).path
+        )
+        let second = try env.store.addRoot(path: secondDir.url.path)
+        installRoutes(env) { _ in
+            .json(200, #"{"assets": []}"#)
+        } upload: { _, _ in
+            .json(201, assetJSON(id: "asset_x", checksumB64: sha256B64("aaa")))
+        }
+
+        let engine = env.engine()
+        let analysis = try await engine.runAnalysis()
+
+        // Only ONE of the plan's roots unmounts: nothing may upload — a
+        // partial run recorded as completed would silently strand approved
+        // files.
+        try FileManager.default.removeItem(at: secondDir.url)
+        await #expect(
+            throws: SyncEngineError.unreachableRunRoots(paths: [second.path])
+        ) {
+            _ = try await engine.runUpload(continuing: analysis.runId)
+        }
+        #expect(env.bodies(for: "/api/assets").isEmpty)
+    }
+
+    @Test func fileChangedDuringStagingIsNeverUploaded() async throws {
+        defer { EngineTestStub.reset() }
+        let env = try makeEnv()
+        let url = try writeAged(env.dir, "b.jpg", "bbbb")
+        let originalMtime = try FileManager.default
+            .attributesOfItem(atPath: url.path)[.modificationDate] as? Date
+        installRoutes(env) { _ in
+            .json(200, #"{"assets": []}"#)
+        } upload: { _, _ in
+            .json(201, assetJSON(id: "asset_b", checksumB64: sha256B64("bbbb")))
+        }
+
+        let engine = env.engine()
+        let analysis = try await engine.runAnalysis()
+
+        // Same size, same mtime, different bytes: the pre-upload stat check
+        // passes, so only the staged-digest verification stands between the
+        // additive API and unreviewed bytes.
+        try Data("bxbb".utf8).write(to: url)
+        try FileManager.default.setAttributes(
+            [.modificationDate: originalMtime ?? Date()], ofItemAtPath: url.path
+        )
+
+        let result = try await engine.runUpload(continuing: analysis.runId)
+
+        #expect(result.uploaded == 0)
+        #expect(result.skippedChanged == 1)
+        #expect(env.bodies(for: "/api/assets").isEmpty)
+        // Skipped by the DIGEST check (the stat check passed), and the stale
+        // hash is invalidated so re-analysis actually recovers.
+        #expect(
+            env.events.items.contains(
+                .fileIssue(
+                    relPath: "b.jpg",
+                    message: "changed during upload staging; re-analyze to upload"
+                )
+            )
+        )
+        #expect(try env.store.filesNeedingHash().map(\.relPath) == ["b.jpg"])
+
+        // And the promised remediation works: re-analyze, then upload the
+        // new bytes.
+        installRoutes(env) { _ in
+            .json(200, #"{"assets": []}"#)
+        } upload: { _, _ in
+            .json(201, assetJSON(id: "asset_b2", checksumB64: sha256B64("bxbb")))
+        }
+        let second = try await env.engine().runAnalysis()
+        #expect(second.counters.toUpload == 1)
+        let secondUpload = try await env.engine().runUpload(continuing: second.runId)
+        #expect(secondUpload.uploaded == 1)
+        #expect(try env.store.statusCounts()[.synced] == 1)
     }
 
     @Test func uploadEmitsPerFileLifecycleEvents() async throws {

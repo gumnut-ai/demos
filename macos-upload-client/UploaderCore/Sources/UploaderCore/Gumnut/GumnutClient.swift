@@ -76,6 +76,10 @@ public struct GumnutClient: Sendable {
     /// Uploads one file. `200 .alreadyExisted` (identical bytes already in the
     /// library) is as much a success as `201 .created`. `onProgress` reports
     /// (bytesSent, bytesTotal) of the encoded body, from URLSession's queue.
+    /// When `expectedSHA256` is given, the staged body's file bytes are
+    /// verified against it before anything is sent — a file that changed
+    /// between the caller's analysis and the staging read throws
+    /// `.stagedFileChanged` instead of uploading unreviewed bytes.
     public func uploadAsset(
         fileURL: URL,
         fileName: String? = nil,
@@ -84,6 +88,7 @@ public struct GumnutClient: Sendable {
         fileCreatedAt: Date,
         fileModifiedAt: Date,
         libraryId: String? = nil,
+        expectedSHA256: Data? = nil,
         onProgress: (@Sendable (Int64, Int64) -> Void)? = nil
     ) async throws -> (outcome: UploadOutcome, asset: GumnutAsset) {
         let name = fileName ?? fileURL.lastPathComponent
@@ -108,8 +113,11 @@ public struct GumnutClient: Sendable {
         // written or deleted.
         let bodyURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("upload-body-\(UUID().uuidString)")
-        try form.writeEncoded(to: bodyURL)
+        let stagedDigest = try form.writeEncoded(to: bodyURL)
         defer { try? FileManager.default.removeItem(at: bodyURL) }
+        if let expectedSHA256, stagedDigest != expectedSHA256 {
+            throw GumnutClientError.stagedFileChanged
+        }
 
         var request = makeRequest(path: "/api/assets", method: "POST")
         request.setValue(form.contentType, forHTTPHeaderField: "Content-Type")
