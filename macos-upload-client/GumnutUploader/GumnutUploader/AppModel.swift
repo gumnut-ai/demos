@@ -201,7 +201,13 @@ final class AppModel {
     }
 
     /// Removes only the app's records for this root — never files on disk.
+    /// Refused mid-run: the engine holds snapshots of the root and its file
+    /// rows, and a cascade delete underneath it corrupts the run.
     func removeRoot(_ rootId: Int64) {
+        guard !isRunning else {
+            alertMessage = "Wait for the current run to finish before removing a folder."
+            return
+        }
         guard let store else { return }
         do {
             try store.removeRoot(rootId)
@@ -255,6 +261,14 @@ final class AppModel {
     /// reset, so an edited-but-unapplied destination can never be uploaded
     /// to against the old destination's sync state.
     func applyServerSettings(serverURL candidate: String, libraryId: String?) {
+        // Same backstop as removeRoot: resetting sync state under a live
+        // engine would seed the new destination with the old server's asset
+        // ids. The Apply button is disabled while running; this guards the
+        // race where a run starts after the click lands.
+        guard !isRunning else {
+            alertMessage = "Wait for the current run to finish before changing the server."
+            return
+        }
         guard let store else { return }
         let normalized = Self.normalizeServerURL(candidate)
         guard let url = URL(string: normalized),
@@ -348,6 +362,10 @@ final class AppModel {
     }
 
     func analyze() {
+        // The prior plan dies the moment a new analysis starts (the engine
+        // clears the persisted id too): a cancelled or failed analysis must
+        // not leave newly hashed files uploadable through the old plan.
+        lastAnalysis = nil
         startRun { engine in
             let result = try await engine.runAnalysis()
             await MainActor.run {

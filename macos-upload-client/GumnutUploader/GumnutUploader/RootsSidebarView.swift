@@ -18,6 +18,7 @@ struct RootsSidebarView: View {
                             Button("Remove from app…", role: .destructive) {
                                 rootPendingRemoval = root
                             }
+                            .disabled(model.isRunning)
                         }
                 }
             }

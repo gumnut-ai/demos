@@ -165,6 +165,12 @@ public actor SyncEngine {
 
         let run = try store.beginRun(rootIds: reachable.compactMap(\.id))
         let runId = run.id!
+        // Starting a new analysis invalidates the prior reviewed plan: files
+        // this run scans and hashes must never become uploadable through an
+        // old plan's root scope without crossing a review gate. A cancelled
+        // or failed analysis therefore leaves no uploadable plan (re-analyze
+        // to get one) — success re-records the id below.
+        try store.setLastCompletedAnalysisRunId(nil)
         do {
             var tally = ScanTally()
             var stillReachable: [Root] = []

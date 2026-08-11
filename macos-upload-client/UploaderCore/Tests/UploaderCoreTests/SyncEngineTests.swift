@@ -216,12 +216,14 @@ private func assetJSON(id: String, checksumB64: String) -> String {
         let result = try await env.engine().runAnalysis()
         #expect(try env.store.lastCompletedAnalysisRunId() == result.runId)
 
-        // A failed analysis never clobbers the reviewed plan's run.
+        // Starting a new analysis invalidates the prior plan, so a failed
+        // analysis leaves NO uploadable plan — files it hashed must not ride
+        // the old plan's root scope past the review gate.
         installRoutes(env, exist: { _ in .json(500, "{}") })
         await #expect(throws: (any Error).self) {
             _ = try await env.engine().runAnalysis()
         }
-        #expect(try env.store.lastCompletedAnalysisRunId() == result.runId)
+        #expect(try env.store.lastCompletedAnalysisRunId() == nil)
     }
 
     @Test func secondAnalysisRehashesNothing() async throws {
@@ -835,6 +837,9 @@ private func assetJSON(id: String, checksumB64: String) -> String {
         }
 
         #expect(try env.store.latestRuns()[0].outcome == .cancelled)
+        // A cancelled analysis leaves no uploadable plan: its hashed files
+        // must cross a review gate before any upload can touch them.
+        #expect(try env.store.lastCompletedAnalysisRunId() == nil)
         let counts = try env.store.statusCounts()
         // Progress persisted, but the run did not finish all 12 files.
         #expect((counts[.pending] ?? 0) == 12)
