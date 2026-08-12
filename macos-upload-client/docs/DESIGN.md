@@ -1,12 +1,11 @@
 # macOS Upload Client — Design
 
-**Status: implemented (pre-release).** The engine and the full UI are
+**Status: implemented and shipped.** The engine and the full UI are
 built: `UploaderCore/` holds the tested engine (preflight → scan → hash
 → check → review gate → upload), and `GumnutUploader/` is the sandboxed
 SwiftUI app — roots sidebar, stats cards, plan tree with persistent
 exclusions, per-directory file list, activity bar, run history, and the
 Settings window (server URL, API key in Keychain, library, concurrency).
-Remaining before calling it done: a supervised real-library pass.
 
 A native macOS app that one-way syncs photo and video files from local
 folders to a Gumnut Photos library. Upload-only by construction: the app
