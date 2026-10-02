@@ -347,7 +347,8 @@ final class AppModel {
         // A library id is only meaningful on the server it was listed from;
         // changing servers drops it until the user picks one from the new
         // server's list.
-        let library = normalized == serverURLString ? libraryId : nil
+        let serverChanged = normalized != serverURLString
+        let library = serverChanged ? nil : libraryId
         do {
             let didReset = try store.updateServerConfiguration(
                 serverURL: normalized, libraryId: library
@@ -358,7 +359,11 @@ final class AppModel {
             // saved key, or to none (the app returns to setup) if it has
             // never been entered.
             apiKey = KeychainStore.loadAPIKey(server: normalized) ?? ""
-            libraries = []
+            // The listed libraries stay valid for the same server; keep them so
+            // the picker doesn't empty when only the library changed.
+            if serverChanged {
+                libraries = []
+            }
             if didReset {
                 // The reviewed plan belonged to the old destination.
                 lastAnalysis = nil

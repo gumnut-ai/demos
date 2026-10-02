@@ -222,7 +222,7 @@ private func assetJSON(id: String, checksumB64: String) -> String {
             try await env.engine().runAnalysis()
         }
         #expect(env.bodies(for: "/api/assets/exist").isEmpty)
-        #expect(try env.store.lastCompletedAnalysisRunId() == nil)
+        #expect(try env.store.latestRuns().isEmpty)
     }
 
     @Test func selectedLibraryIsSentToExistenceCheckWithoutListing() async throws {

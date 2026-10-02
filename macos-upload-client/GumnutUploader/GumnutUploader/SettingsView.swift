@@ -93,12 +93,13 @@ struct SettingsView: View {
             apiKeyDraft = model.apiKey
             serverURLDraft = model.serverURLString
             libraryDraft = model.selectedLibraryId
-        }
-        // The library picker is only populated by a connection test; run one
-        // on open so a saved key doesn't leave the picker empty.
-        .task {
+            // The library picker is only populated by a connection test; run
+            // one on open so a saved key doesn't leave the picker empty.
+            // Unstructured like the buttons' tests: a `.task` would be
+            // cancelled when Settings closes and report the cancellation as a
+            // failure.
             if !model.apiKey.isEmpty, model.libraries.isEmpty {
-                await model.testConnection()
+                Task { await model.testConnection() }
             }
         }
         .onChange(of: model.apiKey) { apiKeyDraft = model.apiKey }
