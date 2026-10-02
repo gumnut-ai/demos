@@ -585,7 +585,10 @@ public actor SyncEngine {
 
         let times = try? reader.fileTimes(at: fileURL)
         let modified = times?.modified ?? Date(timeIntervalSince1970: file.mtime)
-        let created = times?.created ?? modified
+        // Copying a file resets its creation time but keeps its modified
+        // time, so the earlier of the two is the better capture-date guess
+        // for files without embedded metadata (Immich uses the same rule).
+        let created = min(times?.created ?? modified, modified)
 
         let fileId = file.id!
         emit(

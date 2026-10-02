@@ -200,7 +200,9 @@ user-authored state.
 6. **Upload.** Approved files only, ~3 concurrent, throttled
    client-side. Multipart `POST /assets` with `file_created_at` /
    `file_modified_at` from filesystem stats (the service extracts EXIF
-   itself), a stable `device_asset_id` (root UUID + relative path),
+   itself; `file_created_at` is the earlier of the creation and
+   modified times, since copying a file resets only its creation
+   time), a stable `device_asset_id` (root UUID + relative path),
    and a per-install `device_id`. Response handling:
    - Before sending, the staged request body's file bytes are hashed
      and compared against the analyzed digest — a file whose bytes
