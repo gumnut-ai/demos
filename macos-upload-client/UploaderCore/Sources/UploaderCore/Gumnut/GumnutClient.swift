@@ -56,13 +56,12 @@ public struct GumnutClient: Sendable {
                 count: sha256Digests.count, max: Self.maxExistenceCheckItems
             )
         }
-        var body: [String: Any] = [
+        let body: [String: Any] = [
             "checksums": sha256Digests.map { $0.base64EncodedString() }
         ]
-        if let libraryId {
-            body["library_id"] = libraryId
-        }
-        var request = makeRequest(path: "/api/assets/exist", method: "POST")
+        // The endpoint takes library_id as a query parameter, not a body field.
+        let query = libraryId.map { [URLQueryItem(name: "library_id", value: $0)] } ?? []
+        var request = makeRequest(path: "/api/assets/exist", method: "POST", query: query)
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
 
@@ -143,8 +142,14 @@ public struct GumnutClient: Sendable {
 
     // MARK: - Request plumbing
 
-    private func makeRequest(path: String, method: String) -> URLRequest {
-        var request = URLRequest(url: baseURL.appending(path: path))
+    private func makeRequest(
+        path: String, method: String, query: [URLQueryItem] = []
+    ) -> URLRequest {
+        var url = baseURL.appending(path: path)
+        if !query.isEmpty {
+            url.append(queryItems: query)
+        }
+        var request = URLRequest(url: url)
         request.httpMethod = method
         request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Accept")

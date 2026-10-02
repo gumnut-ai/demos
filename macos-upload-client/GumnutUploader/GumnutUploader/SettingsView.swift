@@ -20,7 +20,7 @@ struct SettingsView: View {
                 TextField("Server URL", text: $serverURLDraft, prompt: Text(Store.defaultServerURL))
                     .autocorrectionDisabled()
                 Picker("Library", selection: $libraryDraft) {
-                    Text("Account default").tag(String?.none)
+                    Text("Account default (single-library accounts only)").tag(String?.none)
                     ForEach(model.libraries, id: \.id) { library in
                         Text(library.name).tag(Optional(library.id))
                     }
@@ -93,6 +93,14 @@ struct SettingsView: View {
             apiKeyDraft = model.apiKey
             serverURLDraft = model.serverURLString
             libraryDraft = model.selectedLibraryId
+            // The library picker is only populated by a connection test; run
+            // one on open so a saved key doesn't leave the picker empty.
+            // Unstructured like the buttons' tests: a `.task` would be
+            // cancelled when Settings closes and report the cancellation as a
+            // failure.
+            if !model.apiKey.isEmpty, model.libraries.isEmpty {
+                Task { await model.testConnection() }
+            }
         }
         .onChange(of: model.apiKey) { apiKeyDraft = model.apiKey }
         .onChange(of: model.serverURLString) { serverURLDraft = model.serverURLString }

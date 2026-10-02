@@ -125,7 +125,8 @@ private func assetJSON(id: String, checksumB64: String) -> String {
         },
         upload: @escaping @Sendable (URLRequest, Data?) -> StubURLProtocol.Response = { _, _ in
             .json(500, "{}")
-        }
+        },
+        libraries: String = #"[{"id": "lib_1", "name": "Photos"}]"#
     ) {
         let calls = env.calls
         EngineTestStub.handler = { request, body in
@@ -134,6 +135,8 @@ private func assetJSON(id: String, checksumB64: String) -> String {
             switch path {
             case "/api/users/me":
                 return .json(200, #"{"id": "intuser_1"}"#)
+            case "/api/libraries":
+                return .json(200, libraries)
             case "/api/assets/exist":
                 return exist(body)
             case "/api/assets":
@@ -204,6 +207,42 @@ private func assetJSON(id: String, checksumB64: String) -> String {
 
         #expect(env.phases == [.preflight, .scanning, .hashing, .checking, .finished])
         #expect(try env.store.latestRuns()[0].outcome == .completed)
+    }
+
+    @Test func analysisWithoutLibraryFailsUpFrontOnMultiLibraryAccount() async throws {
+        defer { EngineTestStub.reset() }
+        let env = try makeEnv()
+        try writeAged(env.dir, "a.jpg", "aaa")
+        installRoutes(
+            env,
+            libraries: #"[{"id": "lib_1", "name": "A"}, {"id": "lib_2", "name": "B"}]"#
+        )
+
+        await #expect(throws: SyncEngineError.libraryRequired(libraryCount: 2)) {
+            try await env.engine().runAnalysis()
+        }
+        #expect(env.bodies(for: "/api/assets/exist").isEmpty)
+        #expect(try env.store.latestRuns().isEmpty)
+    }
+
+    @Test func selectedLibraryIsSentToExistenceCheckWithoutListing() async throws {
+        defer { EngineTestStub.reset() }
+        let env = try makeEnv()
+        try writeAged(env.dir, "a.jpg", "aaa")
+        try env.store.updateServerConfiguration(
+            serverURL: Store.defaultServerURL, libraryId: "lib_2"
+        )
+        installRoutes(
+            env,
+            libraries: #"[{"id": "lib_1", "name": "A"}, {"id": "lib_2", "name": "B"}]"#
+        )
+
+        _ = try await env.engine().runAnalysis()
+
+        let paths = env.calls.items.map(\.path)
+        #expect(!paths.contains("/api/libraries"))
+        let existRequest = env.calls.items.first { $0.path == "/api/assets/exist" }?.request
+        #expect(existRequest?.url?.query() == "library_id=lib_2")
     }
 
     @Test func completedAnalysisIsRecordedForLaterUpload() async throws {
@@ -433,6 +472,25 @@ private func assetJSON(id: String, checksumB64: String) -> String {
         #expect(run.counters.uploaded == 1)
         #expect(run.counters.bytesUploaded == 4)
         #expect(run.counters.toUpload == 0)
+    }
+
+    @Test func uploadWithoutLibraryFailsUpFrontOnMultiLibraryAccount() async throws {
+        defer { EngineTestStub.reset() }
+        let env = try makeEnv()
+        try writeAged(env.dir, "a.jpg", "aaa")
+        installRoutes(env)
+        let analysis = try await env.engine().runAnalysis()
+
+        // A second library appears between review and upload.
+        installRoutes(
+            env,
+            libraries: #"[{"id": "lib_1", "name": "A"}, {"id": "lib_2", "name": "B"}]"#
+        )
+        await #expect(throws: SyncEngineError.libraryRequired(libraryCount: 2)) {
+            try await env.engine().runUpload(continuing: analysis.runId)
+        }
+        #expect(!env.calls.items.map(\.path).contains("/api/assets"))
+        #expect(try env.store.statusCounts()[.pending] == 1)
     }
 
     @Test func uploadOnlyCoversRootsRecordedByTheAnalysis() async throws {

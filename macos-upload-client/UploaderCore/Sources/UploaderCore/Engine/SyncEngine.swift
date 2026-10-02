@@ -47,6 +47,9 @@ public enum SyncEngineError: Error, Equatable {
     /// break the review-before-upload guarantee.
     case unreachableRunRoots(paths: [String])
     case runNotFound(Int64)
+    /// No target library is selected and the account has several, so the
+    /// server cannot pick a default. Nothing was scanned or uploaded.
+    case libraryRequired(libraryCount: Int)
 }
 
 public struct SyncEngineConfiguration: Sendable {
@@ -163,7 +166,7 @@ public actor SyncEngine {
 
         // Validates the API key before any work.
         _ = try await client.currentUser()
-        let libraryId = try store.libraryId()
+        let libraryId = try await resolvedLibraryId()
 
         let run = try store.beginRun(rootIds: reachable.compactMap(\.id))
         let runId = run.id!
@@ -400,6 +403,20 @@ public actor SyncEngine {
         )
     }
 
+    /// The stored target library. With none selected the server falls back
+    /// to the account's only library, but refuses every library-scoped call
+    /// once there are several — fail the run up front instead of per file.
+    private func resolvedLibraryId() async throws -> String? {
+        if let stored = try store.libraryId() {
+            return stored
+        }
+        let libraries = try await client.libraries()
+        guard libraries.count <= 1 else {
+            throw SyncEngineError.libraryRequired(libraryCount: libraries.count)
+        }
+        return nil
+    }
+
     // MARK: - Check phase
 
     private func checkPhase(rootIds: [Int64], libraryId: String?) async throws {
@@ -465,7 +482,7 @@ public actor SyncEngine {
             uniqueKeysWithValues: roots.compactMap { root in root.id.map { ($0, root) } }
         )
         let deviceId = try store.deviceId()
-        let libraryId = try store.libraryId()
+        let libraryId = try await resolvedLibraryId()
 
         uploadResult = UploadResult()
         stopUploads = false
