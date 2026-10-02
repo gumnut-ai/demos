@@ -474,6 +474,59 @@ private func assetJSON(id: String, checksumB64: String) -> String {
         #expect(run.counters.toUpload == 0)
     }
 
+    /// Uploads one file with the given filesystem times and returns the
+    /// multipart `file_created_at` / `file_modified_at` values sent.
+    private func uploadedFileTimes(
+        created: Date, modified: Date
+    ) async throws -> (created: String?, modified: String?) {
+        let env = try makeEnv()
+        let url = try env.dir.write("a.jpg", Data("aaa".utf8))
+        // Set mtime first: macOS pulls the birth time back to an earlier mtime.
+        try FileManager.default.setAttributes([.modificationDate: modified], ofItemAtPath: url.path)
+        try FileManager.default.setAttributes([.creationDate: created], ofItemAtPath: url.path)
+        let attrs = try FileManager.default.attributesOfItem(atPath: url.path)
+        #expect(attrs[.creationDate] as? Date == created)
+        #expect(attrs[.modificationDate] as? Date == modified)
+        installRoutes(env) { _ in
+            .json(200, #"{"assets": []}"#)
+        } upload: { _, _ in
+            .json(201, assetJSON(id: "asset_a", checksumB64: sha256B64("aaa")))
+        }
+
+        let engine = env.engine()
+        let analysis = try await engine.runAnalysis()
+        let result = try await engine.runUpload(continuing: analysis.runId)
+        #expect(result.uploaded == 1)
+
+        let upload = try #require(env.calls.items.first { $0.path == "/api/assets" })
+        let contentType = upload.request.value(forHTTPHeaderField: "Content-Type") ?? ""
+        let boundary = String(contentType.dropFirst("multipart/form-data; boundary=".count))
+        let parts = parseMultipart(body: upload.body ?? Data(), boundary: boundary)
+        func field(_ name: String) -> String? {
+            parts.first { $0.name == name }.map { String(decoding: $0.body, as: UTF8.self) }
+        }
+        return (field("file_created_at"), field("file_modified_at"))
+    }
+
+    @Test func uploadSendsModifiedTimeWhenCreationTimeIsLater() async throws {
+        defer { EngineTestStub.reset() }
+        // A copied file: creation time reset to the copy date, mtime kept.
+        let modified = Date(timeIntervalSince1970: 1_056_975_230)  // 2003-06-30
+        let created = Date(timeIntervalSince1970: 1_450_560_007)  // 2015-12-19
+        let sent = try await uploadedFileTimes(created: created, modified: modified)
+        #expect(sent.created == "2003-06-30T12:13:50.000Z")
+        #expect(sent.modified == "2003-06-30T12:13:50.000Z")
+    }
+
+    @Test func uploadKeepsCreationTimeWhenEarlierThanModified() async throws {
+        defer { EngineTestStub.reset() }
+        let created = Date(timeIntervalSince1970: 1_056_975_230)  // 2003-06-30
+        let modified = Date(timeIntervalSince1970: 1_450_560_007)  // 2015-12-19
+        let sent = try await uploadedFileTimes(created: created, modified: modified)
+        #expect(sent.created == "2003-06-30T12:13:50.000Z")
+        #expect(sent.modified == "2015-12-19T21:20:07.000Z")
+    }
+
     @Test func uploadWithoutLibraryFailsUpFrontOnMultiLibraryAccount() async throws {
         defer { EngineTestStub.reset() }
         let env = try makeEnv()
