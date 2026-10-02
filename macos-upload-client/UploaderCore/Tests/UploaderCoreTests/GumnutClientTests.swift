@@ -68,8 +68,9 @@ import Testing
                 digestA.base64EncodedString(), digestB.base64EncodedString(),
             ]
         )
-        #expect(sentBody?["library_id"] as? String == "lib_1")
+        #expect(sentBody?["library_id"] == nil)
         #expect(StubURLProtocol.lastRequest?.url?.path() == "/api/assets/exist")
+        #expect(StubURLProtocol.lastRequest?.url?.query() == "library_id=lib_1")
     }
 
     @Test func checkExistenceRejectsOversizedBatchesClientSide() async throws {

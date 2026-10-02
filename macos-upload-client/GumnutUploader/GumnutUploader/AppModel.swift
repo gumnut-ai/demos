@@ -715,6 +715,10 @@ final class AppModel {
                     + ". Nothing was uploaded — reconnect the volume or run Analyze again."
             case .runNotFound:
                 return "The analysis this upload was based on is gone. Run Analyze again."
+            case .libraryRequired(let count):
+                return "This account has \(count) libraries, so the server needs to know "
+                    + "which one to use. Pick a target library in Settings, apply it, "
+                    + "and run Analyze again."
             }
         case let clientError as GumnutClientError:
             switch clientError {
