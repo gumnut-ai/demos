@@ -124,4 +124,13 @@ lock = (
     + "".join(f"          {key}: {value}\n" for key, value in sanitizer_env)
     + lock[guard_end:]
 )
+# The pinned compiler's resolver appends the input ref as a version comment.
+# With a full SHA override that comment repeats the unchanged action pin; without
+# a resolver it is absent. Normalize only that exact setup-ref metadata suffix.
+lock = re.sub(
+    r"^((?:        uses: |#   - )github/gh-aw/actions/setup@([0-9a-f]{40})) # \2$",
+    r"\1",
+    lock,
+    flags=re.MULTILINE,
+)
 path.write_text(lock)

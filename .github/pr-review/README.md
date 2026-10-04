@@ -10,12 +10,12 @@ missing detection-image digests, activation policy binding, native sanitizer par
 review YAML files. The CI contract test also checks out that exact native commit and runs
 `GH_AW_ACTIONS_DIR=<native-checkout>/actions/setup/js node --test .github/pr-review/reviewer*.test.cjs`,
 exercising native collection, the trusted guard, native publication and readback. CI also verifies the v0.89.21 Linux compiler download by SHA-256, recompiles and
-normalizes this source, and fails if its lockfile differs. Commit the source and lock together. The reviewed daemon
+normalizes this source (including only redundant setup-SHA comments), and fails if its lockfile differs. Commit the source and lock together. The reviewed daemon
 and its lanes remain the review-policy authority.
 
 The repository variable `PR_REVIEW_ENABLED=true` admits inference. Missing or
 false disables review execution. Before enabling it, configure `CODEX_API_KEY`,
-install the publisher App with Pull Requests read/write access, and set
+install the publisher App with Contents read and Pull Requests read/write access, and set
 `PR_REVIEW_APP_CLIENT_ID` and `PR_REVIEW_APP_PRIVATE_KEY` in the `pr-review-publisher` environment.
 Set repository variable `PR_REVIEW_BOT_LOGIN` to the exact observed
 `<app-slug>[bot]` login. This App must be separate from the PR-creation App.
