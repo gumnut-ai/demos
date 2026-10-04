@@ -215,6 +215,7 @@ test('compiled workflow isolates publisher secrets and trusted checkouts', () =>
   const admission = lock.match(/^  pre_activation:\n[\s\S]*?(?=^  [a-z_]+:\n)/m)[0];
   assert.match(admission, /contents: read/);
   assert.match(admission, /pull-requests: read/);
+  assert.match(admission, /issues: read/, "getIssue in live comment admission requires explicit Issues read");
   assert.doesNotMatch(admission, /pull-requests: write|contents: write/);
   const commentWorkflow = fs.readFileSync(root + '/.github/workflows/pr-review-comment.yml', 'utf8');
   assert.match(commentWorkflow, /issue_comment:/);

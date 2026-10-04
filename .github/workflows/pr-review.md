@@ -19,6 +19,7 @@ on:
   permissions:
     actions: read
     contents: read
+    issues: read
     pull-requests: read
   steps:
     - name: Read reviewed default-branch policy only

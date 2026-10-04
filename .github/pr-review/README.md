@@ -9,7 +9,8 @@ missing detection-image digests, activation policy binding, native sanitizer par
 `node --test .github/pr-review/reviewer.test.cjs` and `actionlint` on the
 review YAML files. The CI contract test also checks out that exact native commit and runs
 `GH_AW_ACTIONS_DIR=<native-checkout>/actions/setup/js node --test .github/pr-review/reviewer*.test.cjs`,
-exercising native collection, the trusted guard, native publication and readback. Commit the source and lock together. The reviewed daemon
+exercising native collection, the trusted guard, native publication and readback. CI also verifies the v0.89.21 Linux compiler download by SHA-256, recompiles and
+normalizes this source, and fails if its lockfile differs. Commit the source and lock together. The reviewed daemon
 and its lanes remain the review-policy authority.
 
 The repository variable `PR_REVIEW_ENABLED=true` admits inference. Missing or
@@ -30,8 +31,10 @@ A reviewer request for `CharlieHelps` or `the configured reviewer App bot`, a co
 or `@CharlieHelps review` command line, and default-branch manual dispatch are
 supported. A separate read-only comment-admission workflow hands off numeric
 PR/comment IDs and a coarse command-candidate Boolean through authenticated
-run metadata. Ordinary comments skip both source and routing jobs before runner
-allocation; the Boolean never grants authorization. A read-only routing workflow
+run metadata. Comments without a recognized command substring skip both source
+and routing jobs before runner allocation. Command-like prose can start read-only
+admission, but the complete live command parser rejects it before inference or
+the PR queue. The Boolean never grants authorization. A read-only routing workflow
 re-fetches the source run, exact workflow path, comment and author permissions.
 Only eligible requests call the same-commit native reusable workflow and enter its
 whole-pipeline PR queue; ordinary comments cannot replace pending review work.
