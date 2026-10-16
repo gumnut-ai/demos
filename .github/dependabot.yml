@@ -1,0 +1,26 @@
+version: 2
+updates:
+  - package-ecosystem: npm
+    # Keep routine version-update options out of default-branch security jobs.
+    target-branch: main
+    assignees:
+      - ternarybits
+    directory: /geoviewer
+    schedule:
+      interval: daily
+      time: "06:00"
+      timezone: America/Los_Angeles
+    cooldown:
+      default-days: 14
+    versioning-strategy: lockfile-only
+    allow:
+      - dependency-type: direct
+        update-types:
+          - version-update:semver-minor
+          - version-update:semver-patch
+    groups:
+      javascript-dependencies:
+        applies-to: version-updates
+        patterns:
+          - "*"
+    open-pull-requests-limit: 1
