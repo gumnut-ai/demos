@@ -25,6 +25,8 @@ taken from the lane's filename.
 
 ## Repo conventions
 
+- Follow [Agent Workflow Design](../../docs/references/agent-workflows.md) when
+  authoring or reviewing daemon policies and their supporting scripts.
 - Keep `<daemon-id>` and the frontmatter `id` in sync with each other.
 - No CI validates these files — a malformed daemon, or a lane at the wrong path, fails
   silently by producing no findings rather than an error. Verify changes by hand, and
