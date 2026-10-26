@@ -12,8 +12,10 @@ dependencies beyond a browser and a way to serve a directory locally.
 
 > ⚠️ **Mutates your library.** This demo's main job is to call
 > `PATCH /api/faces/{id}` to move faces between people (or detach them).
-> Every reassignment and detach is real and immediate. There is an Undo
-> (`Z`) but it only walks back the in-session history.
+> Every reassignment, detach, and acceptance of an assigned face is real and
+> immediate. Accept records the existing assignment as manually confirmed.
+> Undo (`Z`) walks back in-session actions, but cannot restore automatic
+> assignment provenance after confirmation.
 
 ## Quick start
 
@@ -71,9 +73,9 @@ subject.
 | --- | --- |
 | `1`–`5` (or click a candidate) | `PATCH /api/faces/{id}` with that Person's id. |
 | `D` | Detach — `PATCH /api/faces/{id}` with `person_id: null`. The face goes back to the unassigned pool and re-enters clustering on the next pass. |
-| `A` | Accept — local-only mark. Confirms correctly assigned, hides the face from the list. |
+| `A` | Accept — saves the person displayed on the face as a manual assignment, then hides the face. In **Could be on subject**, this confirms the displayed other person. For unassigned faces, only hides the face locally. |
 | `S` | Skip — local-only mark; doesn't touch the server. |
-| `Z` | Undo the most recent action, including server-side reassign/detach. |
+| `Z` | Undo the most recent action, including server-side reassign/detach. Undoing Accept reopens local review; its manual confirmation stays saved on the server. |
 | `←` / `→` | Navigate without acting. |
 
 Reviewed faces are tracked in `localStorage`
@@ -107,7 +109,12 @@ subject Person it calls:
   `person_id` is null AND whose candidate list contains the subject.
 - `GET /api/faces/{id}` and `GET /api/assets?ids=…` — face-crop and
   parent-asset thumbnails plus the bbox overlay (lazy + prefetched).
-- `PATCH /api/faces/{id}` — reassignments and detaches.
+- `PATCH /api/faces/{id}` — reassignments, detaches, and confirmations
+  (Accept sends the current person ID). Requires an API version that records
+  same-person assignments as manual confirmations; older versions return
+  success without changing provenance. Deploy that backend support before
+  using Accept for confirmation. Earlier local-only acceptances are not
+  retroactively confirmed.
 
 Per-face flags (`closer_to_other`, `sibling_ambig`,
 `within_distance_gate`) are derived in the browser from the closest
@@ -150,3 +157,5 @@ libraries you own.
 - `index.html` — the dashboard. Vanilla JS, ES modules, no build step.
 - `run.sh` — tiny launcher: starts `python3 -m http.server` and opens
   the page.
+- `test-actions.mjs` — credential-free action regression tests. Run with
+  `node --test test-actions.mjs` (Node.js 22+); no packages to install.

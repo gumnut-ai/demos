@@ -295,7 +295,7 @@
     <div id="face-card-host"></div>
     <div class="actions">
       <button id="prev-btn">← Prev</button>
-      <button id="accept-btn" class="primary" title="Confirm this is correctly assigned, don't show again">Accept (A)</button>
+      <button id="accept-btn" class="primary" title="Save this assignment as manually confirmed, don't show again">Accept (A)</button>
       <button id="skip-btn" title="Not sure — leave as-is, come back later">Skip (S)</button>
       <button id="detach-btn" class="danger">Detach (D)</button>
       <button id="next-btn">Next →</button>
@@ -1242,8 +1242,8 @@ async function render() {
   const subject = state.snapshot.subject;
   const subjectName = subject.name ?? UNNAMED_LABEL;
 
-  // Accept confirms the face's *current* placement and hides it — it
-  // never calls the server. Spell out what "current" means in this tab
+  // Accept confirms the assigned person displayed in this review.
+  // Unassigned faces only get a local review mark. Spell out "current"
   // so the operator isn't told a face is "assigned" when it's really
   // unassigned (or sitting on a donor). textContent/.title are
   // injection-safe, so the names don't need escaping here.
@@ -1256,10 +1256,10 @@ async function render() {
     } else if (face.mode === 'inverse') {
       const donorName = face.current_person_name ?? UNNAMED_LABEL;
       acceptLabel = `Accept — keep on ${donorName} (A)`;
-      acceptTitle = `Confirm this face should stay on ${donorName}, don't show again`;
+      acceptTitle = `Save the assignment to ${donorName} as manually confirmed, don't show again`;
     } else {
       acceptLabel = `Accept — keep on ${subjectName} (A)`;
-      acceptTitle = `Confirm this face is correctly on ${subjectName}, don't show again`;
+      acceptTitle = `Save the assignment to ${subjectName} as manually confirmed, don't show again`;
     }
     acceptBtnEl.textContent = acceptLabel;
     acceptBtnEl.title = acceptTitle;
@@ -1596,19 +1596,29 @@ function skipCurrent() {
   advance();
 }
 
-function acceptCurrent() {
-  // "This face really is the subject — confirm and move on." Local-only
-  // mark, no API call. Tracked separately from 'skipped' so the user can
-  // distinguish "confirmed correct" from "unsure, revisit later".
+async function acceptCurrent() {
   if (state.actionInFlight) return;
   if (state.index >= state.faces.length) return;
   const face = state.faces[state.index];
   flashButton(document.getElementById('accept-btn'));
-  state.reviewed[face.face_id] = 'accepted';
-  state.history.push({ faceId: face.face_id, prevPersonId: currentPersonId(face.face_id), action: 'accepted' });
-  saveReviewed(state.personId, state.reviewed);
-  refreshUndo();
-  advance();
+  state.actionInFlight = true;
+  try {
+    const personId = currentPersonId(face.face_id);
+    if (personId !== null) {
+      await state.client.updateFace(face.face_id, state.snapshot.library_id, personId);
+      recordAssignment(face.face_id, personId);
+    }
+    state.reviewed[face.face_id] = 'accepted';
+    state.history.push({ faceId: face.face_id, prevPersonId: personId, action: 'accepted' });
+    saveReviewed(state.personId, state.reviewed);
+    refreshUndo();
+    advance();
+  } catch (e) {
+    toast(`Accept failed: ${e.message}`, 'error', 6000);
+    console.error(e);
+  } finally {
+    state.actionInFlight = false;
+  }
 }
 
 async function undoLast() {
@@ -1619,8 +1629,8 @@ async function undoLast() {
   flashButton(undoBtn);
   state.actionInFlight = true;
   try {
-    // 'skipped' and 'accepted' are local-only marks — no server PATCH
-    // happened, so undoing them is just clearing the reviewed flag below.
+    // Undoing Accept reopens local review only: the API cannot restore
+    // automatic provenance, so the manual confirmation stays recorded.
     if (last.action !== 'skipped' && last.action !== 'accepted') {
       try {
         await state.client.updateFace(last.faceId, state.snapshot.library_id, last.prevPersonId);
@@ -1639,6 +1649,9 @@ async function undoLast() {
     }
     delete state.reviewed[last.faceId];
     saveReviewed(state.personId, state.reviewed);
+    if (last.action === 'accepted' && last.prevPersonId !== null) {
+      toast('Reopened for review; manual confirmation remains saved on the server.');
+    }
     // Move back to the face we just undid
     const idx = state.faces.findIndex(f => f.face_id === last.faceId);
     if (idx >= 0) state.index = idx;
