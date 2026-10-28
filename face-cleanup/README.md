@@ -12,8 +12,10 @@ dependencies beyond a browser and a way to serve a directory locally.
 
 > ⚠️ **Mutates your library.** This demo's main job is to call
 > `PATCH /api/faces/{id}` to move faces between people (or detach them).
-> Every reassignment and detach is real and immediate. There is an Undo
-> (`Z`) but it only walks back the in-session history.
+> Every reassignment, detach, and acceptance of an assigned face is real and
+> immediate. Accept records the existing assignment as manually confirmed.
+> Undo (`Z`) reopens local review or makes another ordinary assignment.
+> It cannot reverse server history or restore automatic assignment provenance.
 
 ## Quick start
 
@@ -70,16 +72,25 @@ subject.
 | Key | Action |
 | --- | --- |
 | `1`–`5` (or click a candidate) | `PATCH /api/faces/{id}` with that Person's id. |
-| `D` | Detach — `PATCH /api/faces/{id}` with `person_id: null`. The face goes back to the unassigned pool and re-enters clustering on the next pass. |
-| `A` | Accept — local-only mark. Confirms correctly assigned, hides the face from the list. |
+| `D` | Detach — `PATCH /api/faces/{id}` with `person_id: null`. Clears the saved assignment; later automatic assignment follows the backend's review policy. |
+| `A` | Accept — saves the person displayed on the face as a manual assignment, then hides the face. In **Could be on subject**, this confirms the displayed other person. For unassigned faces, only hides the face locally. |
 | `S` | Skip — local-only mark; doesn't touch the server. |
-| `Z` | Undo the most recent action, including server-side reassign/detach. |
+| `Z` | Undo the most recent in-session action. Accept/Skip only reopen local review. For reassignment/Detach, makes a fresh assignment or clear using the previous displayed person. It does not restore earlier review state, reverse server history, or restore automatic provenance. |
 | `←` / `→` | Navigate without acting. |
 
 Reviewed faces are tracked in `localStorage`
 (`fcd:reviewed:{personId}`, keyed per subject) so closing the tab and
 coming back later doesn't make you re-walk what you've already done.
 Switching subjects starts a fresh reviewed map.
+
+Actions use the current assignment displayed in this session, including the
+assignment returned by a successful edit. The server applies the requested
+person (or null) even if another client changed the owner since the view loaded;
+there is no displayed-owner check. Reload fetches current server assignments,
+while local reviewed marks remain per subject. If a request fails or its response
+is lost, the face stays available, but the write may already have saved. Reload
+to check its current assignment before retrying. Navigation, filters, and subject
+changes are blocked while a write is pending.
 
 After a batch of reassignments the centroid shifts; click **Pick
 another person ↗** in the header and re-pick the same subject to
@@ -107,7 +118,15 @@ subject Person it calls:
   `person_id` is null AND whose candidate list contains the subject.
 - `GET /api/faces/{id}` and `GET /api/assets?ids=…` — face-crop and
   parent-asset thumbnails plus the bbox overlay (lazy + prefetched).
-- `PATCH /api/faces/{id}` — reassignments and detaches.
+- `PATCH /api/faces/{id}` — reassignments, detaches, and confirmations
+  (Accept sends the current person ID). Requires an API version that records
+  same-person assignments as manual confirmations; older versions return
+  success without changing provenance. Deploy that backend support before
+  using Accept for confirmation. Earlier local-only acceptances are not
+  retroactively confirmed. Assignment and Detach use the same endpoint whether
+  or not backend review recording is enabled. Durable review recording and
+  automatic assignment enforcement require their backend rollout; this client
+  does not enable or verify that rollout.
 
 Per-face flags (`closer_to_other`, `sibling_ambig`,
 `within_distance_gate`) are derived in the browser from the closest
@@ -150,3 +169,5 @@ libraries you own.
 - `index.html` — the dashboard. Vanilla JS, ES modules, no build step.
 - `run.sh` — tiny launcher: starts `python3 -m http.server` and opens
   the page.
+- `test-actions.mjs` — credential-free action regression tests. Run with
+  `node --test test-actions.mjs` (Node.js 22+); no packages to install.

@@ -295,7 +295,7 @@
     <div id="face-card-host"></div>
     <div class="actions">
       <button id="prev-btn">← Prev</button>
-      <button id="accept-btn" class="primary" title="Confirm this is correctly assigned, don't show again">Accept (A)</button>
+      <button id="accept-btn" class="primary" title="Save this assignment as manually confirmed, don't show again">Accept (A)</button>
       <button id="skip-btn" title="Not sure — leave as-is, come back later">Skip (S)</button>
       <button id="detach-btn" class="danger">Detach (D)</button>
       <button id="next-btn">Next →</button>
@@ -658,9 +658,6 @@ async function buildInverseFaces(snapshot, onProgress) {
     for (const c of f.candidates) donorIds.add(c.id);
   }
   donorIds.delete(snapshot.subject.id); // never list the subject itself
-  const peopleById = new Map();
-  for (const p of snapshot.people) peopleById.set(p.id, p);
-
   const inverseFaces = [];
   const donorList = [...donorIds];
   for (let i = 0; i < donorList.length; i++) {
@@ -670,8 +667,6 @@ async function buildInverseFaces(snapshot, onProgress) {
     if (state.snapshot !== snapshot) return inverseFaces;
     const donorId = donorList[i];
     if (onProgress) onProgress(i, donorList.length, inverseFaces.length);
-    const donor = peopleById.get(donorId);
-    const donorName = donor?.name ?? null;
     let cursor = null;
     // A single transient failure on one donor shouldn't wipe the whole
     // partial result — log it, skip that donor, keep walking. The
@@ -708,8 +703,6 @@ async function buildInverseFaces(snapshot, onProgress) {
             }],
             mode: 'inverse',
             initial_person_id: donorId,
-            current_person_id: donorId,
-            current_person_name: donorName,
             // Match the same flag shape as normal faces so existing
             // tab/badge code doesn't have to special-case mode.
             closer_to_other: false,
@@ -1078,6 +1071,7 @@ function renderTabs() {
   for (const [key, label] of defs) {
     const b = document.createElement('button');
     b.textContent = label;
+    b.disabled = state.actionInFlight;
     if (key === state.filter) b.classList.add('active');
     b.onclick = () => { setFilter(key); };
     tabs.appendChild(b);
@@ -1092,6 +1086,7 @@ async function ensureInverseFaces() {
   const snap = state.snapshot;
   if (snap.inverseFaces != null || snap.inverseLoading) return;
   snap.inverseLoading = true;
+  refreshActionControls();
   renderTabs();
   // Replace the face card with a progress message — the operator should
   // see something happening even before the first donor's faces arrive.
@@ -1099,7 +1094,7 @@ async function ensureInverseFaces() {
   progress.innerHTML = '';
   try {
     snap.inverseFaces = await buildInverseFaces(snap, (cur, total, found) => {
-      if (state.filter !== 'inverse') return;
+      if (state.snapshot !== snap || state.filter !== 'inverse') return;
       const el = document.getElementById('inverse-loading');
       if (el) {
         el.textContent = `Loading inverse-assignment list… ${cur}/${total} donors checked · ${found} candidate face${found === 1 ? '' : 's'} found`;
@@ -1112,6 +1107,7 @@ async function ensureInverseFaces() {
     snap.inverseFaces = [];
   } finally {
     snap.inverseLoading = false;
+    refreshActionControls();
   }
 }
 
@@ -1123,12 +1119,13 @@ async function ensureUnassignedFaces() {
   const snap = state.snapshot;
   if (snap.unassignedFaces != null || snap.unassignedLoading) return;
   snap.unassignedLoading = true;
+  refreshActionControls();
   renderTabs();
   faceHost.innerHTML = `<div class="card" id="unassigned-loading">Loading unassigned-candidate list…</div>`;
   progress.innerHTML = '';
   try {
     snap.unassignedFaces = await buildUnassignedFaces(snap, (pages, found) => {
-      if (state.filter !== 'unassigned') return;
+      if (state.snapshot !== snap || state.filter !== 'unassigned') return;
       const el = document.getElementById('unassigned-loading');
       if (el) {
         el.textContent = `Loading unassigned-candidate list… ${pages} page${pages === 1 ? '' : 's'} walked · ${found} candidate face${found === 1 ? '' : 's'} found`;
@@ -1141,10 +1138,13 @@ async function ensureUnassignedFaces() {
     snap.unassignedFaces = [];
   } finally {
     snap.unassignedLoading = false;
+    refreshActionControls();
   }
 }
 
 async function setFilter(filter) {
+  if (state.actionInFlight) return;
+  const snap = state.snapshot;
   state.filter = filter;
   localStorage.setItem(LS_KEY_FILTER, filter);
   if (filter === 'inverse' && state.snapshot.inverseFaces == null) {
@@ -1157,6 +1157,7 @@ async function setFilter(filter) {
       return;
     }
     await ensureInverseFaces();
+    if (state.snapshot !== snap) return;
     // Bail if the operator switched away from inverse while we were
     // loading — re-render the tabs so the new count is visible, but
     // don't clobber the active filter's view.
@@ -1171,6 +1172,7 @@ async function setFilter(filter) {
       return;
     }
     await ensureUnassignedFaces();
+    if (state.snapshot !== snap) return;
     if (state.filter !== 'unassigned') {
       renderTabs();
       return;
@@ -1217,6 +1219,7 @@ async function render() {
   // the previous face's asset and would otherwise stay open showing
   // stale content.
   closeLightbox();
+  refreshActionControls();
   if (!state.faces.length) {
     faceHost.innerHTML = `<div class="card">No faces match this filter.</div>`;
     progress.innerHTML = '';
@@ -1231,35 +1234,28 @@ async function render() {
   const face = state.faces[state.index];
   renderProgress();
 
-  // Detach (PATCH person_id: null) is a no-op against the server when
-  // the face is already unassigned — and marking it 'detached' locally
-  // would mislead the operator about what just happened. Hide the
-  // button for unassigned-tab faces; re-show it otherwise (every other
-  // tab has a current owner to detach from).
+  const ownerId = currentPersonId(face.face_id);
+  const ownerName = currentPersonName(face.face_id);
   const detachBtnEl = document.getElementById('detach-btn');
-  if (detachBtnEl) detachBtnEl.hidden = (face.mode === 'unassigned');
+  if (detachBtnEl) detachBtnEl.hidden = (ownerId === null);
 
   const subject = state.snapshot.subject;
   const subjectName = subject.name ?? UNNAMED_LABEL;
 
-  // Accept confirms the face's *current* placement and hides it — it
-  // never calls the server. Spell out what "current" means in this tab
+  // Accept confirms the assigned person displayed in this review.
+  // Unassigned faces only get a local review mark. Spell out "current"
   // so the operator isn't told a face is "assigned" when it's really
   // unassigned (or sitting on a donor). textContent/.title are
   // injection-safe, so the names don't need escaping here.
   const acceptBtnEl = document.getElementById('accept-btn');
   if (acceptBtnEl) {
     let acceptLabel, acceptTitle;
-    if (face.mode === 'unassigned') {
+    if (ownerId === null) {
       acceptLabel = 'Accept — leave unassigned (A)';
       acceptTitle = "Confirm this face should stay unassigned, don't show again";
-    } else if (face.mode === 'inverse') {
-      const donorName = face.current_person_name ?? UNNAMED_LABEL;
-      acceptLabel = `Accept — keep on ${donorName} (A)`;
-      acceptTitle = `Confirm this face should stay on ${donorName}, don't show again`;
     } else {
-      acceptLabel = `Accept — keep on ${subjectName} (A)`;
-      acceptTitle = `Confirm this face is correctly on ${subjectName}, don't show again`;
+      acceptLabel = `Accept — keep on ${ownerName} (A)`;
+      acceptTitle = `Save the assignment to ${ownerName} as manually confirmed, don't show again`;
     }
     acceptBtnEl.textContent = acceptLabel;
     acceptBtnEl.title = acceptTitle;
@@ -1282,15 +1278,14 @@ async function render() {
   let metaCore;
   let candidatesHeader;
   if (face.mode === 'inverse') {
-    const donorName = face.current_person_name ?? UNNAMED_LABEL;
     metaCore = `
-      <span><strong>currently:</strong> ${escapeHtml(donorName)} · d=${dCurrentStr}</span>
+      <span><strong>currently:</strong> ${escapeHtml(ownerName)} · snapshot d=${dCurrentStr}</span>
       <span> · <strong>subject:</strong> ${escapeHtml(subjectName)} · d=${face.d_subject.toFixed(3)}</span>
     `;
     candidatesHeader = 'Reassign to subject';
   } else if (face.mode === 'unassigned') {
     metaCore = `
-      <span><strong>currently:</strong> unassigned · d=${dCurrentStr}</span>
+      <span><strong>currently:</strong> ${escapeHtml(ownerName)} · snapshot d=${dCurrentStr}</span>
       <span> · <strong>subject:</strong> ${escapeHtml(subjectName)} · d=${face.d_subject.toFixed(3)}</span>
     `;
     // The face is unassigned and we offer every nearby named person as a
@@ -1298,7 +1293,7 @@ async function render() {
     // tabs rather than singling out the subject.
     candidatesHeader = 'Assign to a nearby person';
   } else {
-    metaCore = `<span><strong>${escapeHtml(subjectName)}</strong> · d=${dCurrentStr}</span>`;
+    metaCore = `<span><strong>currently:</strong> ${escapeHtml(ownerName)} · snapshot d=${dCurrentStr}</span>`;
     candidatesHeader = 'Nearby candidates';
   }
 
@@ -1407,6 +1402,7 @@ async function render() {
         ? ` · <span class="badge warn">cluster loose</span>` : '';
       const btn = document.createElement('button');
       btn.className = 'candidate' + (inGate ? ' in-gate' : ' out-gate');
+      btn.disabled = Boolean(reviewBusy());
       btn.dataset.personId = c.id;
       const personObj = state.personCache.get(c.id);
       const thumbUrl = personObj && personObj.asset_urls && personObj.asset_urls.thumbnail && personObj.asset_urls.thumbnail.url;
@@ -1522,70 +1518,106 @@ function currentPersonId(faceId) {
   return state.snapshot.subject.id;
 }
 
-// Record the person_id we just sent to the server. Called after every
-// successful PATCH so the next Undo target tracks reality. Kept in a
-// dedicated Map so a missing faceCache entry (e.g., user acted before
-// ensureFace resolved) doesn't silently drop the prev-assignment.
+function currentPersonName(faceId) {
+  const personId = currentPersonId(faceId);
+  if (personId === null) return 'unassigned';
+  const snap = state.snapshot;
+  const face = snap.facesById.get(faceId);
+  const person = [snap.subject, ...snap.people, ...(face?.candidates ?? [])]
+    .find(p => p.id === personId);
+  return person?.name ?? UNNAMED_LABEL;
+}
+
+// Keep the returned assignment separate from thumbnail caches and the
+// original snapshot. Labels and the next action use this same value.
 function recordAssignment(faceId, personId) {
   state.lastAssigned.set(faceId, personId);
 }
 
+async function saveAssignment(faceId, personId) {
+  const saved = await state.client.updateFace(faceId, state.snapshot.library_id, personId);
+  recordAssignment(faceId, saved.person_id);
+  if (saved.person_id !== personId) {
+    render();
+    throw new Error('The returned assignment differs from the requested one. Reload to review it.');
+  }
+}
+
+function reviewBusy() {
+  return state.actionInFlight
+    || (state.filter === 'inverse' && state.snapshot?.inverseLoading)
+    || (state.filter === 'unassigned' && state.snapshot?.unassignedLoading);
+}
+
+function refreshActionControls() {
+  document.querySelectorAll('.actions button, .candidate')
+    .forEach(button => { button.disabled = Boolean(reviewBusy()); });
+  document.querySelectorAll('#filter-tabs button')
+    .forEach(button => { button.disabled = state.actionInFlight; });
+  changeSubjectLink.setAttribute('aria-disabled', String(Boolean(reviewBusy())));
+  refreshUndo();
+}
+
+function setActionInFlight(pending) {
+  state.actionInFlight = pending;
+  refreshActionControls();
+}
+
+function actionFailed(action, error) {
+  toast(`${action} failed: ${error.message}. The request may have saved; reload to check the current assignment before retrying.`, 'error', 10000);
+  console.error(error);
+}
+
 async function assignTo(personId) {
-  if (state.actionInFlight) return;
+  if (reviewBusy()) return;
   if (state.index >= state.faces.length) return;
   const face = state.faces[state.index];
   // Flash the candidate button as soon as it's clicked so the feedback
   // is immediate even if the PATCH hasn't returned yet. The animation
   // lasts ~600ms; the API call typically completes inside that window.
   flashButton(document.querySelector(`.candidate[data-person-id="${CSS.escape(personId)}"]`));
-  state.actionInFlight = true;
+  setActionInFlight(true);
   try {
     const prevPersonId = currentPersonId(face.face_id);
-    await state.client.updateFace(face.face_id, state.snapshot.library_id, personId);
-    recordAssignment(face.face_id, personId);
+    await saveAssignment(face.face_id, personId);
     state.reviewed[face.face_id] = 'reassigned';
     state.history.push({ faceId: face.face_id, prevPersonId, action: 'reassigned' });
     saveReviewed(state.personId, state.reviewed);
     refreshUndo();
     advance();
   } catch (e) {
-    toast(`Assign failed: ${e.message}`, 'error', 6000);
-    console.error(e);
+    actionFailed('Assign', e);
   } finally {
-    state.actionInFlight = false;
+    setActionInFlight(false);
   }
 }
 
 async function detachCurrent() {
-  if (state.actionInFlight) return;
+  if (reviewBusy()) return;
   if (state.index >= state.faces.length) return;
   const face = state.faces[state.index];
-  // Unassigned faces have no current owner to detach from — the PATCH
-  // would be a server-side no-op but the local 'detached' mark would
-  // still be misleading. The button is hidden in unassigned mode; this
-  // short-circuit covers the keyboard shortcut path.
-  if (face.mode === 'unassigned') return;
+  // A face can become assigned or unassigned after the tab was loaded.
+  // The button and shortcut both follow the latest returned assignment.
+  if (currentPersonId(face.face_id) === null) return;
   flashButton(document.getElementById('detach-btn'));
-  state.actionInFlight = true;
+  setActionInFlight(true);
   try {
     const prevPersonId = currentPersonId(face.face_id);
-    await state.client.updateFace(face.face_id, state.snapshot.library_id, null);
-    recordAssignment(face.face_id, null);
+    await saveAssignment(face.face_id, null);
     state.reviewed[face.face_id] = 'detached';
     state.history.push({ faceId: face.face_id, prevPersonId, action: 'detached' });
     saveReviewed(state.personId, state.reviewed);
     refreshUndo();
     advance();
   } catch (e) {
-    toast(`Detach failed: ${e.message}`, 'error', 6000);
-    console.error(e);
+    actionFailed('Detach', e);
   } finally {
-    state.actionInFlight = false;
+    setActionInFlight(false);
   }
 }
 
 function skipCurrent() {
-  if (state.actionInFlight) return;
+  if (reviewBusy()) return;
   if (state.index >= state.faces.length) return;
   const face = state.faces[state.index];
   flashButton(document.getElementById('skip-btn'));
@@ -1596,59 +1628,68 @@ function skipCurrent() {
   advance();
 }
 
-function acceptCurrent() {
-  // "This face really is the subject — confirm and move on." Local-only
-  // mark, no API call. Tracked separately from 'skipped' so the user can
-  // distinguish "confirmed correct" from "unsure, revisit later".
-  if (state.actionInFlight) return;
+async function acceptCurrent() {
+  if (reviewBusy()) return;
   if (state.index >= state.faces.length) return;
   const face = state.faces[state.index];
   flashButton(document.getElementById('accept-btn'));
-  state.reviewed[face.face_id] = 'accepted';
-  state.history.push({ faceId: face.face_id, prevPersonId: currentPersonId(face.face_id), action: 'accepted' });
-  saveReviewed(state.personId, state.reviewed);
-  refreshUndo();
-  advance();
+  setActionInFlight(true);
+  try {
+    const personId = currentPersonId(face.face_id);
+    if (personId !== null) {
+      await saveAssignment(face.face_id, personId);
+    }
+    state.reviewed[face.face_id] = 'accepted';
+    state.history.push({ faceId: face.face_id, prevPersonId: personId, action: 'accepted' });
+    saveReviewed(state.personId, state.reviewed);
+    refreshUndo();
+    advance();
+  } catch (e) {
+    actionFailed('Accept', e);
+  } finally {
+    setActionInFlight(false);
+  }
 }
 
 async function undoLast() {
-  if (state.actionInFlight) return;
+  if (reviewBusy()) return;
   const last = state.history.pop();
   refreshUndo();
   if (!last) return;
   flashButton(undoBtn);
-  state.actionInFlight = true;
+  setActionInFlight(true);
   try {
-    // 'skipped' and 'accepted' are local-only marks — no server PATCH
-    // happened, so undoing them is just clearing the reviewed flag below.
+    // Undoing Accept reopens local review only: the API cannot restore
+    // automatic provenance, so the manual confirmation stays recorded.
     if (last.action !== 'skipped' && last.action !== 'accepted') {
       try {
-        await state.client.updateFace(last.faceId, state.snapshot.library_id, last.prevPersonId);
-        recordAssignment(last.faceId, last.prevPersonId);
+        await saveAssignment(last.faceId, last.prevPersonId);
       } catch (e) {
-        // The PATCH failed: server still has the new person_id. Restore
-        // the history entry so the user can retry, and leave the local
-        // 'reviewed' flag in place so the UI still shows the face as
-        // acted-on (which it is, on the server).
+        // Keep history available. A lost response cannot prove whether
+        // the ordinary assignment saved, so do not promise a reversal.
         state.history.push(last);
         refreshUndo();
-        toast(`Undo failed (server unchanged, retry available): ${e.message}`, 'error', 6000);
-        console.error(e);
+        actionFailed('Undo', e);
         return;
       }
     }
     delete state.reviewed[last.faceId];
     saveReviewed(state.personId, state.reviewed);
+    if (last.action === 'accepted' && last.prevPersonId !== null) {
+      toast('Reopened for review; manual confirmation remains saved on the server.');
+    } else if (last.action === 'reassigned' || last.action === 'detached') {
+      toast('Previous displayed assignment saved as a new edit; this does not reverse earlier server history or restore automatic provenance.', '', 8000);
+    }
     // Move back to the face we just undid
     const idx = state.faces.findIndex(f => f.face_id === last.faceId);
     if (idx >= 0) state.index = idx;
     render();
   } finally {
-    state.actionInFlight = false;
+    setActionInFlight(false);
   }
 }
 
-function refreshUndo() { undoBtn.disabled = state.history.length === 0; }
+function refreshUndo() { undoBtn.disabled = Boolean(reviewBusy()) || state.history.length === 0; }
 
 function advance() {
   do { state.index += 1; }
@@ -1673,8 +1714,8 @@ function back() {
 // Without this, pressing `1` then `→` before the first PATCH resolves
 // would advance once for the arrow, then again when assignTo's awaited
 // advance() runs — silently skipping the face in between.
-function navAdvance() { if (!state.actionInFlight) advance(); }
-function navBack() { if (!state.actionInFlight) back(); }
+function navAdvance() { if (!reviewBusy()) advance(); }
+function navBack() { if (!reviewBusy()) back(); }
 
 document.getElementById('next-btn').onclick = navAdvance;
 document.getElementById('prev-btn').onclick = navBack;
@@ -1731,6 +1772,7 @@ async function init() {
   };
   changeSubjectLink.onclick = (e) => {
     e.preventDefault();
+    if (reviewBusy()) return;
     // Drop only the person — keep the library so we don't re-prompt for
     // it on every subject switch (typical user has one library anyway).
     localStorage.removeItem(LS_KEY_PERSON_ID);
@@ -1975,18 +2017,8 @@ async function launchCleanup() {
 
   hideAllPanels();
   content.hidden = false;
-  // If the operator left the page on a lazy-built tab, kick off the
-  // build so they don't land on an empty "No faces match this filter"
-  // view. Same path setFilter() takes for an explicit click.
-  if (state.filter === 'inverse') {
-    await ensureInverseFaces();
-  } else if (state.filter === 'unassigned') {
-    await ensureUnassignedFaces();
-  }
-  applyFilter(state.filter);
-  renderTabs();
-  render();
-  prefetchNeighbors();
+  // Saved and clicked tabs share the same snapshot-bound load/render path.
+  await setFilter(state.filter);
 }
 
 init().catch(e => {
