@@ -14,8 +14,8 @@ dependencies beyond a browser and a way to serve a directory locally.
 > `PATCH /api/faces/{id}` to move faces between people (or detach them).
 > Every reassignment, detach, and acceptance of an assigned face is real and
 > immediate. Accept records the existing assignment as manually confirmed.
-> Undo (`Z`) walks back in-session actions, but cannot restore automatic
-> assignment provenance after confirmation.
+> Undo (`Z`) reopens local review or makes another ordinary assignment.
+> It cannot reverse server history or restore automatic assignment provenance.
 
 ## Quick start
 
@@ -72,16 +72,25 @@ subject.
 | Key | Action |
 | --- | --- |
 | `1`–`5` (or click a candidate) | `PATCH /api/faces/{id}` with that Person's id. |
-| `D` | Detach — `PATCH /api/faces/{id}` with `person_id: null`. The face goes back to the unassigned pool and re-enters clustering on the next pass. |
+| `D` | Detach — `PATCH /api/faces/{id}` with `person_id: null`. Clears the saved assignment; later automatic assignment follows the backend's review policy. |
 | `A` | Accept — saves the person displayed on the face as a manual assignment, then hides the face. In **Could be on subject**, this confirms the displayed other person. For unassigned faces, only hides the face locally. |
 | `S` | Skip — local-only mark; doesn't touch the server. |
-| `Z` | Undo the most recent action, including server-side reassign/detach. Undoing Accept reopens local review; its manual confirmation stays saved on the server. |
+| `Z` | Undo the most recent in-session action. Accept/Skip only reopen local review. For reassignment/Detach, saves the previous displayed assignment as a new ordinary edit. It does not reverse server history, restore automatic provenance, or cancel earlier durable review decisions. |
 | `←` / `→` | Navigate without acting. |
 
 Reviewed faces are tracked in `localStorage`
 (`fcd:reviewed:{personId}`, keyed per subject) so closing the tab and
 coming back later doesn't make you re-walk what you've already done.
 Switching subjects starts a fresh reviewed map.
+
+Actions use the current assignment displayed in this session, including the
+assignment returned by a successful edit. The server applies the requested
+person (or null) even if another client changed the owner since the view loaded;
+there is no displayed-owner check. Reload fetches current server assignments,
+while local reviewed marks remain per subject. If a request fails or its response
+is lost, the face stays available, but the write may already have saved. Reload
+to check its current assignment before retrying. Navigation, filters, and subject
+changes are blocked while a write is pending.
 
 After a batch of reassignments the centroid shifts; click **Pick
 another person ↗** in the header and re-pick the same subject to
@@ -114,7 +123,10 @@ subject Person it calls:
   same-person assignments as manual confirmations; older versions return
   success without changing provenance. Deploy that backend support before
   using Accept for confirmation. Earlier local-only acceptances are not
-  retroactively confirmed.
+  retroactively confirmed. Assignment and Detach use the same endpoint whether
+  or not backend review recording is enabled. Durable review recording and
+  automatic assignment enforcement require their backend rollout; this client
+  does not enable or verify that rollout.
 
 Per-face flags (`closer_to_other`, `sibling_ambig`,
 `within_distance_gate`) are derived in the browser from the closest
