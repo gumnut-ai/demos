@@ -75,7 +75,7 @@ subject.
 | `D` | Detach — `PATCH /api/faces/{id}` with `person_id: null`. Clears the saved assignment; later automatic assignment follows the backend's review policy. |
 | `A` | Accept — saves the person displayed on the face as a manual assignment, then hides the face. In **Could be on subject**, this confirms the displayed other person. For unassigned faces, only hides the face locally. |
 | `S` | Skip — local-only mark; doesn't touch the server. |
-| `Z` | Undo the most recent in-session action. Accept/Skip only reopen local review. For reassignment/Detach, saves the previous displayed assignment as a new ordinary edit. It does not reverse server history, restore automatic provenance, or cancel earlier durable review decisions. |
+| `Z` | Undo the most recent in-session action. Accept/Skip only reopen local review. For reassignment/Detach, makes a fresh assignment or clear using the previous displayed person. It does not restore earlier review state, reverse server history, or restore automatic provenance. |
 | `←` / `→` | Navigate without acting. |
 
 Reviewed faces are tracked in `localStorage`
