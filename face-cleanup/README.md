@@ -67,6 +67,31 @@ subject.
 | Could be on subject | The inverse view: faces currently assigned to **other** Persons whose nearest-candidate list contains the subject AND where the subject is closer than the face's current Person. Shows up as "currently: \<other name\>" with a single "Reassign to subject" candidate button. Lazy-loaded the first time you open the tab — fans out to every neighboring Person, so it's slower than the other tabs on first click. |
 | Unassigned candidates | Faces currently assigned to **no Person** (`person_id` is null) whose nearest-candidate list contains the subject — production clustering left them unassigned but still considered them close to the subject's centroid. Shows up as "currently: unassigned" with the nearby named Persons offered as destination buttons (closest first, the subject among them) so you can assign the face to whichever identity fits. The face list itself is ordered closest-to-subject first. Lazy-loaded on first click; walks every face in the library (no `person_id IS NULL` server-side filter), so on big libraries this is slower than the inverse tab. |
 
+### Provenance and review scope
+
+By default, all tabs exclude manually created face boxes and faces whose
+current assignment source is manual. Check **Include manually created or
+assigned faces** to review them too. The count beside the checkbox describes
+manual faces excluded or included in the selected tab; tab counts use the same
+scope. This option starts unchecked on each page load.
+
+Each face shows **Box** provenance separately from **Assignment** provenance.
+Automatic assignments distinguish ingest, clustering, and automatic merges.
+Manual assignments include client/API/MCP edits, Accept confirmations, and
+manual person merges; they do not prove someone inspected that individual face.
+Unassigned faces are labeled Unassigned. Unknown assignment provenance stays
+included, with a visible count; an older API that omits `assignment_source`
+also appears as Unknown rather than being guessed automatic or manual.
+
+A manually drawn box has no embedding, so it has no fit distance or nearby
+candidates. When included, it can appear in All and Worst outliers because
+missing distances sort first; that is not evidence the box or identity is wrong.
+
+Filtering is applied when selecting a tab or changing the checkbox. The current
+queue stays navigable after an edit so Prev and Undo can still reach that face,
+even after Accept changes its assignment source to manual. Successful writes
+update the displayed assignment provenance from the API response.
+
 ### Per-face actions
 
 | Key | Action |
@@ -118,6 +143,10 @@ subject Person it calls:
   `person_id` is null AND whose candidate list contains the subject.
 - `GET /api/faces/{id}` and `GET /api/assets?ids=…` — face-crop and
   parent-asset thumbnails plus the bbox overlay (lazy + prefetched).
+- Face responses expose `source` for box creation and `assignment_source` for
+  the current person link. Deploy the backend exposing `assignment_source`
+  before relying on the demo to hide manual assignments; older responses can
+  still hide manual boxes but cannot identify manual assignments.
 - `PATCH /api/faces/{id}` — reassignments, detaches, and confirmations
   (Accept sends the current person ID). Requires an API version that records
   same-person assignments as manual confirmations; older versions return

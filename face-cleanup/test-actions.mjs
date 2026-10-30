@@ -34,7 +34,7 @@ function fixture({ owner = 'person_subject', mode, lastAssigned, fetchResult, la
   let startLoading;
   const loadingStarted = new Promise(resolve => { startLoading = resolve; });
   const buildLazyFaces = () => { startLoading(); return lazyFaces; };
-  const elements = Object.fromEntries(['accept-btn', 'detach-btn', 'undo-btn'].map(id => [id, {}]));
+  const elements = Object.fromEntries(['accept-btn', 'detach-btn', 'undo-btn', 'include-manual'].map(id => [id, {}]));
   const context = createContext({
     state, REQUEST_TIMEOUT_MS: 1000, AbortController, setTimeout, clearTimeout,
     document: { getElementById: id => elements[id], querySelector: () => ({}), querySelectorAll: selector => selector === '#filter-tabs button' ? [] : Object.values(elements) }, undoBtn: elements['undo-btn'],
@@ -43,18 +43,18 @@ function fixture({ owner = 'person_subject', mode, lastAssigned, fetchResult, la
     applyFilter: selected => { state.index = 0; if (selected === 'inverse') state.faces = state.snapshot.inverseFaces; if (selected === 'unassigned') state.faces = state.snapshot.unassignedFaces; }, renderTabs() {},
     faceHost: {}, progress: {}, buildInverseFaces: buildLazyFaces, buildUnassignedFaces: buildLazyFaces,
     loadReviewed: () => ({}), subjectLabel: {}, content: {}, hideAllPanels() {},
-    closeLightbox() {}, renderProgress() {},
+    closeLightbox() {}, renderProgress() {}, renderReviewScope() {},
     buildSnapshot: async () => initialSnapshot, prefetchPersonThumbs: async () => {},
     flashButton() {}, render() { context.refreshActionControls(); }, prefetchNeighbors() {},
     saveReviewed: (_id, reviewed) => saved.push({ ...reviewed }),
     toast: message => messages.push(message), console: { error() {} },
     fetch: async (url, init) => {
       requests.push({ url, method: init.method, body: JSON.parse(init.body) });
-      return fetchResult ? fetchResult(JSON.parse(init.body)) : new Response(JSON.stringify({ person_id: JSON.parse(init.body).person_id }));
+      return fetchResult ? fetchResult(JSON.parse(init.body)) : new Response(JSON.stringify({ person_id: JSON.parse(init.body).person_id, assignment_source: JSON.parse(init.body).person_id === null ? null : 'manual' }));
     },
   });
   runInContext(`${client}\n${actions}\n${navigation}\n${loaders}\n${filter}\n${launch}\n${renderer}\nasync function renderControls() { const face = state.faces[state.index]; ${controls} }\nstate.client = new Client('https://api.example', 'test');`, context);
-  return { state, requests, messages, saved, elements, loadingStarted, accept: context.acceptCurrent, assign: context.assignTo, detach: context.detachCurrent, undo: context.undoLast, next: context.navAdvance, back: context.navBack, skip: context.skipCurrent, filter: context.setFilter, controls: context.renderControls, launch: context.launchCleanup, renderEmpty: context.renderEmpty };
+  return { state, context, requests, messages, saved, elements, loadingStarted, accept: context.acceptCurrent, assign: context.assignTo, detach: context.detachCurrent, undo: context.undoLast, next: context.navAdvance, back: context.navBack, skip: context.skipCurrent, filter: context.setFilter, controls: context.renderControls, launch: context.launchCleanup, renderEmpty: context.renderEmpty };
 }
 
 for (const [name, options, personId] of [
@@ -71,6 +71,7 @@ for (const [name, options, personId] of [
     }]);
     assert.equal(f.state.reviewed.face_test, 'accepted');
     assert.equal(f.state.lastAssigned.get('face_test'), personId);
+    assert.equal(f.state.snapshot.facesById.get('face_test').assignment_source, 'manual');
     assert.equal(f.state.index, 1);
     assert.equal(f.saved.length, 1);
     assert.equal(f.state.actionInFlight, false);
@@ -281,4 +282,114 @@ test('ordinary Undo is a new assignment, while failed Undo preserves history wit
   assert.equal(f.state.lastAssigned.get('face_test'), 'person_subject');
   assert.deepEqual(f.state.reviewed, {});
   assert.match(f.messages[1], /new edit.*does not reverse/);
+});
+
+
+// Exercise the shipped builders and filtering together: manual metadata must
+// survive each list path, and tab counts must describe the visible scope.
+const provenance = html.slice(html.indexOf('// ---------- provenance and review scope ----------'), html.indexOf('// ---------- prefetch helpers ----------'));
+const builders = html.slice(html.indexOf('async function buildSnapshot('), html.indexOf('// ---------- provenance and review scope ----------'));
+const tabsRenderer = html.slice(html.indexOf('function renderTabs()'), html.indexOf('// Triggered the first time the operator opens the inverse tab.'));
+
+function provenanceFixture() {
+  const raw = [
+    { id: 'auto', source: 'automatic', assignment_source: 'assigned' },
+    { id: 'manual_assignment', source: 'automatic', assignment_source: 'manual' },
+    { id: 'manual_box', source: 'manual', assignment_source: null },
+    { id: 'unknown', source: 'automatic', assignment_source: null },
+    { id: 'old_api', source: 'automatic' },
+  ].map(f => ({ ...f, person_id: 'subject', asset_id: 'asset', cluster_assignment: {
+    distance_to_person: 0.8, candidates: [{ person_id: 'subject', name: 'Subject', distance: 0.1 }, { person_id: 'other', name: 'Other', distance: 0.2 }],
+  } }));
+  const elements = { 'manual-summary': {} };
+  const tabButtons = [];
+  const state = { includeManual: false, filter: 'all', reviewed: {}, personCache: new Map(), client: {
+    getPersonWithMetrics: async () => ({ id: 'subject', name: 'Subject' }),
+    listFacesPage: async () => ({ data: raw, has_more: false }),
+    listAllFacesPage: async () => ({ data: raw.map(f => ({ ...f, person_id: null })), has_more: false }),
+  } };
+  const tabs = { appendChild: b => tabButtons.push(b), set innerHTML(_) { tabButtons.length = 0; } };
+  const context = createContext({ state, tabs, SIBLING_MARGIN: 0.05, DISTANCE_GATE: 0.35, OUTLIER_DISTANCE: 0.45,
+    document: { getElementById: id => elements[id], createElement: () => ({ classList: { add() {} } }) },
+    currentPersonId: id => state.snapshot.facesById.get(id)?.initial_person_id ?? null,
+    setFilter: async filter => { context.applyFilter(filter); context.renderTabs(); context.renderReviewScope(); }, console,
+  });
+  runInContext(`${builders}\n${provenance}\n${tabsRenderer}`, context);
+  return { state, raw, context, tabButtons, elements };
+}
+
+for (const mode of ['normal', 'inverse', 'unassigned']) {
+  test(`manual provenance survives the ${mode} builder and is excluded by default`, async () => {
+    const f = provenanceFixture();
+    const snapshot = await f.context.buildSnapshot('library', 'subject', [{ id: 'other', name: 'Other' }]);
+    f.state.snapshot = snapshot;
+    let faces = snapshot.faces;
+    if (mode === 'inverse') faces = snapshot.inverseFaces = await f.context.buildInverseFaces(snapshot);
+    if (mode === 'unassigned') faces = snapshot.unassignedFaces = await f.context.buildUnassignedFaces(snapshot);
+    for (const face of faces) snapshot.facesById.set(face.face_id, face);
+    f.state.filter = mode === 'normal' ? 'all' : mode;
+    f.context.applyFilter(f.state.filter);
+    assert.deepEqual(Array.from(f.state.faces, face => face.face_id).sort(), ['auto', 'old_api', 'unknown']);
+    f.context.renderReviewScope();
+    assert.match(f.elements['manual-summary'].textContent, /2 manual faces hidden/);
+    f.context.renderTabs();
+    assert.ok(f.tabButtons.some(b => b.textContent === (mode === 'normal' ? 'All (3)' : mode === 'inverse' ? 'Could be on subject (3)' : 'Unassigned candidates (3)')));
+    if (mode === 'normal') {
+      for (const tab of ['closer', 'ambig', 'gate', 'outliers', 'all']) {
+        f.context.applyFilter(tab);
+        assert.ok(f.state.faces.every(face => !['manual_assignment', 'manual_box'].includes(face.face_id)), tab);
+      }
+    }
+    await f.context.setIncludeManual(true);
+    assert.equal(f.state.faces.length, 5);
+    assert.match(f.elements['manual-summary'].textContent, /2 manual faces included/);
+    await f.context.setIncludeManual(false);
+    assert.equal(f.state.faces.length, 3);
+    f.state.actionInFlight = true;
+    await f.context.setIncludeManual(true);
+    assert.equal(f.state.includeManual, false);
+  });
+}
+
+test('box and assignment labels distinguish manual, automatic, unknown, and unassigned', async () => {
+  const f = provenanceFixture();
+  f.state.snapshot = await f.context.buildSnapshot('library', 'subject', []);
+  for (const [source, expected] of [
+    ['assigned', 'Automatic — ingest'], ['clustered', 'Automatic — clustered'],
+    ['auto_merged', 'Automatic — merged'], ['manual', 'Manual'], [null, 'Unknown'], [undefined, 'Unknown'],
+  ]) {
+    const labels = f.context.provenanceLabels({ face_id: 'auto', source: 'automatic', assignment_source: source });
+    assert.match(labels, /Box: Automatically detected/);
+    assert.ok(labels.includes(`Assignment: ${expected}</span>`));
+  }
+  const labels = f.context.provenanceLabels({ face_id: 'missing', source: 'manual', assignment_source: null });
+  assert.match(labels, /Box: Manually created/);
+  assert.match(labels, /Assignment: Unassigned/);
+});
+
+test('a response from an older API clears stale assignment provenance to unknown', async () => {
+  const f = fixture({ fetchResult: body => new Response(JSON.stringify({ person_id: body.person_id })) });
+  f.state.snapshot.facesById.get('face_test').assignment_source = 'assigned';
+  await f.accept();
+  assert.equal(f.state.snapshot.facesById.get('face_test').assignment_source, undefined);
+});
+
+
+test('Accept refreshes provenance tab counts without removing recent edits from Prev and Undo', async () => {
+  const f = fixture();
+  f.context.OUTLIER_DISTANCE = 0.45;
+  f.state.includeManual = false;
+  f.state.snapshot.faces = f.state.faces;
+  f.state.faces.forEach(face => { face.d_current = 0.7; face.assignment_source = 'assigned'; });
+  const buttons = [];
+  f.context.tabs = { appendChild: b => buttons.push(b), set innerHTML(_) { buttons.length = 0; } };
+  f.context.document.createElement = () => ({ classList: { add() {} } });
+  runInContext(`${provenance}\n${tabsRenderer}`, f.context);
+  f.context.renderTabs();
+  assert.ok(buttons.some(b => b.textContent === 'All (2)'));
+  await f.accept();
+  assert.ok(buttons.some(b => b.textContent === 'All (1)'));
+  assert.equal(f.state.faces.length, 2);
+  f.back();
+  assert.equal(f.state.faces[f.state.index].face_id, 'face_test');
 });

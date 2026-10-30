@@ -52,6 +52,9 @@
   header h1 { margin: 0; font-size: 16px; font-weight: 600; }
   header .subject { color: var(--muted); }
   header .change-subject { margin-left: 4px; font-size: 12px; }
+  .review-options { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; margin-bottom: 12px; }
+  .review-options label { display: inline-flex; align-items: center; gap: 8px; min-height: 44px; cursor: pointer; }
+  .review-options input { accent-color: var(--accent); }
   header .filter-tabs { display: flex; gap: 6px; margin-left: auto; flex-wrap: wrap; }
   header .filter-tabs button.active { background: var(--accent); border-color: var(--accent); color: #fff; }
   main { max-width: 1100px; margin: 0 auto; padding: 16px; }
@@ -291,6 +294,10 @@
   </div>
 
   <div id="content" hidden>
+    <div class="review-options">
+      <label><input type="checkbox" id="include-manual" /> Include manually created or assigned faces</label>
+      <span id="manual-summary" class="hint" aria-live="polite"></span>
+    </div>
     <div class="progress" id="progress"></div>
     <div id="face-card-host"></div>
     <div class="actions">
@@ -499,6 +506,7 @@ const state = {
   peoplePicker: [],   // every person (named + unnamed) in selected library, sorted by face_count desc
   faces: [],          // current filtered list
   filter: 'closer',
+  includeManual: false,
   index: 0,
   reviewed: {},       // map face_id -> 'skipped' | 'reassigned' | 'detached' | 'accepted' (subject-scoped)
   faceCache: new Map(),    // face_id -> face response (asset_urls)
@@ -585,6 +593,7 @@ async function buildSnapshot(libraryId, personId, peopleAll, onProgress) {
     const d_current = f.cluster_assignment?.distance_to_person ?? Infinity;
     const top = cands[0] ?? null;
     return {
+      ...faceProvenance(f),
       face_id: f.id,
       asset_id: f.asset_id,
       bbox: f.bounding_box,
@@ -691,6 +700,7 @@ async function buildInverseFaces(snapshot, onProgress) {
           const d_current = f.cluster_assignment?.distance_to_person ?? Infinity;
           if (subjCand.distance >= d_current) continue;
           inverseFaces.push({
+            ...faceProvenance(f),
             face_id: f.id,
             asset_id: f.asset_id,
             bbox: f.bounding_box,
@@ -771,6 +781,7 @@ async function buildUnassignedFaces(snapshot, onProgress) {
         }
         destinations.sort((a, b) => a.d - b.d);
         unassignedFaces.push({
+          ...faceProvenance(f),
           face_id: f.id,
           asset_id: f.asset_id,
           bbox: f.bounding_box,
@@ -814,7 +825,43 @@ async function buildUnassignedFaces(snapshot, onProgress) {
   return unassignedFaces;
 }
 
-function applyFilter(filter) {
+// ---------- provenance and review scope ----------
+function faceProvenance(face) {
+  return { source: face.source, assignment_source: face.assignment_source };
+}
+
+function isManualFace(face) {
+  return face.source === 'manual' || face.assignment_source === 'manual';
+}
+
+function visibleFaces(faces) {
+  return state.includeManual ? faces : faces.filter(face => !isManualFace(face));
+}
+
+function provenanceLabels(face) {
+  const box = { automatic: 'Automatically detected', manual: 'Manually created' }[face.source] ?? 'Unknown';
+  const assignment = currentPersonId(face.face_id) === null ? 'Unassigned' : ({
+    assigned: 'Automatic — ingest', clustered: 'Automatic — clustered',
+    auto_merged: 'Automatic — merged', manual: 'Manual',
+  }[face.assignment_source] ?? 'Unknown');
+  return `<span class="badge">Box: ${box}</span> <span class="badge" title="Manual includes client assignments, confirmations, and person merges; it does not prove individual human review.">Assignment: ${assignment}</span>`;
+}
+
+function renderReviewScope() {
+  const faces = filterFaces(state.filter);
+  const manualCount = faces.filter(isManualFace).length;
+  const missingCount = visibleFaces(faces).filter(f => currentPersonId(f.face_id) !== null && f.assignment_source == null).length;
+  const summary = state.includeManual ? `${manualCount} manual faces included in this tab.` : `${manualCount} manual faces hidden in this tab.`;
+  document.getElementById('manual-summary').textContent = summary + (missingCount ? ` Unknown assignment provenance: ${missingCount} included.` : '');
+}
+
+async function setIncludeManual(include) {
+  if (state.actionInFlight) return;
+  state.includeManual = include;
+  await setFilter(state.filter);
+}
+
+function filterFaces(filter) {
   let list;
   if (filter === 'inverse') {
     // Lazily computed; see ensureInverseFaces(). Until the first load
@@ -835,7 +882,14 @@ function applyFilter(filter) {
     else if (filter === 'all')    list = [...all].sort((a, b) => b.d_current - a.d_current);
     else                          list = all;
   }
-  state.faces = list;
+  return list;
+}
+
+function applyFilter(filter) {
+  // Keep this review queue stable while editing: Prev and Undo must still
+  // reach the last face even after Accept makes its assignment manual.
+  // Re-evaluate provenance when a tab or the include option is selected.
+  state.faces = visibleFaces(filterFaces(filter));
   state.index = 0;
   // Skip past already-reviewed faces
   while (state.index < state.faces.length && state.reviewed[state.faces[state.index].face_id]) {
@@ -1036,26 +1090,27 @@ function hideAllPanels() {
 }
 
 function renderTabs() {
+  const faces = visibleFaces(state.snapshot.faces);
   const counts = {
-    closer:   state.snapshot.faces.filter(f => f.closer_to_other).length,
-    ambig:    state.snapshot.faces.filter(f => f.sibling_ambig).length,
-    gate:     state.snapshot.faces.filter(f => f.within_distance_gate).length,
-    outliers: state.snapshot.faces.filter(f => f.d_current >= OUTLIER_DISTANCE).length,
-    all:      state.snapshot.faces.length,
+    closer:   faces.filter(f => f.closer_to_other).length,
+    ambig:    faces.filter(f => f.sibling_ambig).length,
+    gate:     faces.filter(f => f.within_distance_gate).length,
+    outliers: faces.filter(f => f.d_current >= OUTLIER_DISTANCE).length,
+    all:      faces.length,
   };
   // Inverse tab count is unknown until the operator opens the tab and
   // we paginate through the donors. Render '?' until the first build,
   // 'loading…' while in flight, and the final count afterwards.
   let inverseLabel;
   if (state.snapshot.inverseLoading)         inverseLabel = 'Could be on subject (loading…)';
-  else if (state.snapshot.inverseFaces != null) inverseLabel = `Could be on subject (${state.snapshot.inverseFaces.length})`;
+  else if (state.snapshot.inverseFaces != null) inverseLabel = `Could be on subject (${visibleFaces(state.snapshot.inverseFaces).length})`;
   else                                        inverseLabel = 'Could be on subject (?)';
 
   // Same '?' / 'loading…' / final-count cycle as the inverse tab — the
   // unassigned build also can't pre-count without walking the library.
   let unassignedLabel;
   if (state.snapshot.unassignedLoading)         unassignedLabel = 'Unassigned candidates (loading…)';
-  else if (state.snapshot.unassignedFaces != null) unassignedLabel = `Unassigned candidates (${state.snapshot.unassignedFaces.length})`;
+  else if (state.snapshot.unassignedFaces != null) unassignedLabel = `Unassigned candidates (${visibleFaces(state.snapshot.unassignedFaces).length})`;
   else                                          unassignedLabel = 'Unassigned candidates (?)';
 
   const defs = [
@@ -1220,6 +1275,7 @@ async function render() {
   // stale content.
   closeLightbox();
   refreshActionControls();
+  renderReviewScope();
   if (!state.faces.length) {
     faceHost.innerHTML = `<div class="card">No faces match this filter.</div>`;
     progress.innerHTML = '';
@@ -1302,6 +1358,7 @@ async function render() {
     <div class="card">
       <div class="face-meta">
         ${reviewedTag}
+        ${provenanceLabels(face)}
         ${badgeFor(face)}
         ${metaCore}
         <span> · face <code>${face.face_id}</code></span>
@@ -1537,6 +1594,12 @@ function recordAssignment(faceId, personId) {
 async function saveAssignment(faceId, personId) {
   const saved = await state.client.updateFace(faceId, state.snapshot.library_id, personId);
   recordAssignment(faceId, saved.person_id);
+  const face = state.snapshot.facesById.get(faceId);
+  if (face) {
+    // Missing provenance from an older API is unknown, never inferred manual.
+    face.assignment_source = saved.assignment_source;
+  }
+  renderTabs();
   if (saved.person_id !== personId) {
     render();
     throw new Error('The returned assignment differs from the requested one. Reload to review it.');
@@ -1554,6 +1617,7 @@ function refreshActionControls() {
     .forEach(button => { button.disabled = Boolean(reviewBusy()); });
   document.querySelectorAll('#filter-tabs button')
     .forEach(button => { button.disabled = state.actionInFlight; });
+  document.getElementById('include-manual').disabled = state.actionInFlight;
   changeSubjectLink.setAttribute('aria-disabled', String(Boolean(reviewBusy())));
   refreshUndo();
 }
@@ -1761,6 +1825,7 @@ async function init() {
   document.getElementById('save-creds').onclick = onSaveCreds;
   document.getElementById('library-continue').onclick = onLibraryContinue;
   document.getElementById('person-filter').oninput = renderPersonList;
+  document.getElementById('include-manual').onchange = e => setIncludeManual(e.target.checked);
   document.getElementById('switch-library').onclick = (e) => {
     e.preventDefault();
     localStorage.removeItem(LS_KEY_LIBRARY_ID);
