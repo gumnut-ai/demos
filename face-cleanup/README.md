@@ -141,8 +141,12 @@ subject Person it calls:
   `person_id`, paginated) — every face in the library, used by the
   **Unassigned candidates** tab. Walked client-side to keep rows whose
   `person_id` is null AND whose candidate list contains the subject.
-- `GET /api/faces/{id}` and `GET /api/assets?ids=…` — face-crop and
-  parent-asset thumbnails plus the bbox overlay (lazy + prefetched).
+- `GET /api/faces/{id}` and `GET /api/assets?ids=…&include=variants` — face-crop
+  and parent-asset URLs plus the bbox overlay (lazy + prefetched). The variants
+  expansion supplies the larger preview URL for click-to-enlarge; asset reads
+  without it return only a thumbnail. Only thumbnail image bytes are prefetched;
+  the lightbox loads the preview when opened. Video assets use their extracted
+  still-image variants; video originals are not loaded into image elements.
 - Face responses expose `source` for box creation and `assignment_source` for
   the current person link. Deploy the backend exposing `assignment_source`
   before relying on the demo to hide manual assignments; older responses can

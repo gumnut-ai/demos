@@ -464,6 +464,8 @@ class Client {
     const qs = new URLSearchParams();
     assetIds.forEach(id => qs.append('ids', id));
     qs.set('library_id', libraryId);
+    // Asset reads are thumbnail-only by default; the lightbox needs preview URLs.
+    qs.set('include', 'variants');
     qs.set('limit', String(Math.max(1, Math.min(100, assetIds.length))));
     return this._req('GET', `/api/assets?${qs}`);
   }
@@ -1002,27 +1004,27 @@ async function prefetchNeighbors() {
   }
 }
 
-// Pick the best variant URL for "open this in a new tab". Prefer a
-// browser-friendly mid-size variant; fall back through the chain.
+// Pick a browser image for the lightbox and "open asset" link. Video
+// variants use _image names for stills; never load video bytes into an <img>.
 function pickAssetViewUrl(asset) {
   const urls = asset && asset.asset_urls;
   if (!urls) return null;
-  for (const key of ['preview', 'fullsize', 'original', 'thumbnail']) {
-    if (urls[key] && urls[key].url) return urls[key].url;
+  for (const key of ['preview', 'preview_image', 'large', 'large_image', 'fullsize', 'fullsize_image', 'original', 'thumbnail', 'thumbnail_image']) {
+    const variant = urls[key];
+    if (variant?.url && (key !== 'original' || variant.mimetype?.startsWith('image/'))) return variant.url;
   }
   return null;
 }
 
-// Best variant URL for *inline* display. Smaller is better here — we're
-// rendering many of these and prefetching ahead. Falls forward through
-// larger variants if the small ones are missing.
+// Prefer the small image for inline display and byte prefetch, including
+// extracted video stills. Only fall through to larger images when necessary.
 function pickAssetThumbUrl(asset) {
   const urls = asset && asset.asset_urls;
   if (!urls) return null;
-  for (const key of ['thumbnail', 'preview', 'fullsize', 'original']) {
-    if (urls[key] && urls[key].url) return urls[key].url;
+  for (const key of ['thumbnail', 'thumbnail_image', 'small', 'small_image']) {
+    if (urls[key]?.url) return urls[key].url;
   }
-  return null;
+  return pickAssetViewUrl(asset);
 }
 
 // Warm the per-Person thumbnail cache up-front so candidate buttons don't
@@ -1515,16 +1517,7 @@ let lightboxEl = null;
 
 function openLightbox(asset, bbox) {
   closeLightbox();
-  // Prefer preview (mid-size, browser-friendly); fall through to larger
-  // variants if missing. We don't use thumbnail here — the whole point
-  // is that it's bigger than what the inline thumb shows.
-  const urls = asset && asset.asset_urls;
-  const url = (urls && (
-    (urls.preview && urls.preview.url) ||
-    (urls.fullsize && urls.fullsize.url) ||
-    (urls.original && urls.original.url) ||
-    (urls.thumbnail && urls.thumbnail.url)
-  )) || null;
+  const url = pickAssetViewUrl(asset);
   if (!url) { toast('No larger variant available', 'error'); return; }
 
   const overlayStyle = bboxOverlayStyle(asset, bbox);

@@ -393,3 +393,73 @@ test('Accept refreshes provenance tab counts without removing recent edits from 
   f.back();
   assert.equal(f.state.faces[f.state.index].face_id, 'face_test');
 });
+
+// Model the API's lean default so losing include=variants reproduces the
+// thumbnail-only lightbox, including when neighbor prefetch fills the cache.
+const assetHelpers = html.slice(html.indexOf('// ---------- prefetch helpers ----------'), html.indexOf('// Warm the per-Person thumbnail cache up-front'));
+const lightbox = html.slice(html.indexOf('function bboxOverlayStyle('), html.indexOf('// ---------- actions ----------'));
+
+for (const video of [false, true]) {
+for (const prefetched of [false, true]) {
+  test(`${video ? 'Video still' : 'Photo'} lightbox loads a distinct preview with ${prefetched ? 'prefetched' : 'on-demand'} asset metadata`, async () => {
+    const requests = [];
+    const warmed = [];
+    const mounted = [];
+    const state = {
+      snapshot: { library_id: 'lib_test' }, index: 0, prefetchInFlight: false,
+      faces: [{ face_id: 'face_test', asset_id: 'asset_test' }],
+      faceCache: new Map([['face_test', {}]]), assetCache: new Map(),
+    };
+    const context = createContext({
+      state, URLSearchParams, AbortController, setTimeout, clearTimeout,
+      REQUEST_TIMEOUT_MS: 1000, PREFETCH_RADIUS: 2, PREFETCH_BATCH_SIZE: 100,
+      Image: class { set src(url) { warmed.push(url); } },
+      document: {
+        createElement: () => ({ innerHTML: '', addEventListener() {}, remove() {} }),
+        body: { appendChild: element => mounted.push(element) },
+      },
+      toast: () => assert.fail('A larger preview should be available'), console,
+      fetch: async url => {
+        requests.push(new URL(url));
+        const variants = new URL(url).searchParams.get('include') === 'variants';
+        const asset_urls = { [video ? 'thumbnail_image' : 'thumbnail']: { url: 'https://cdn.example/thumb.jpg', width: 360, mimetype: 'image/jpeg' } };
+        if (variants) {
+          asset_urls[video ? 'preview_image' : 'preview'] = { url: 'https://cdn.example/preview.jpg', width: 1440, mimetype: 'image/jpeg' };
+          if (video) asset_urls.original = { url: 'https://cdn.example/video.mp4', mimetype: 'video/mp4' };
+        }
+        return new Response(JSON.stringify({ data: [{ id: 'asset_test', width: 1440, height: 960, asset_urls }] }));
+      },
+    });
+    runInContext(`${client}\n${assetHelpers}\n${lightbox}\nstate.client = new Client('https://api.example', 'test');`, context);
+    if (prefetched) await context.prefetchNeighbors();
+    const asset = await context.ensureAsset('asset_test');
+    assert.equal(requests.length, 1);
+    assert.equal(requests[0].searchParams.get('library_id'), 'lib_test');
+    assert.deepEqual(requests[0].searchParams.getAll('ids'), ['asset_test']);
+    assert.equal(context.pickAssetThumbUrl(asset), 'https://cdn.example/thumb.jpg');
+    assert.deepEqual(warmed, prefetched ? ['https://cdn.example/thumb.jpg'] : []);
+    context.openLightbox(asset, { x: 144, y: 96, w: 288, h: 192 });
+    assert.equal(mounted.length, 1);
+    assert.match(mounted[0].innerHTML, /src="https:\/\/cdn.example\/preview.jpg"/);
+    assert.doesNotMatch(mounted[0].innerHTML, /thumb.jpg/);
+    assert.match(mounted[0].innerHTML, /left:10%;top:10%;width:20%;height:20%/);
+    assert.equal(context.lightboxOpen(), true);
+    context.closeLightbox();
+    assert.equal(context.lightboxOpen(), false);
+  });
+}
+
+}
+
+test('image selectors never use a video original when a larger still is missing', () => {
+  const context = createContext({});
+  const selectors = html.slice(html.indexOf('function pickAssetViewUrl('), html.indexOf('// Warm the per-Person thumbnail cache up-front'));
+  runInContext(selectors, context);
+  const asset = { asset_urls: { original: { url: 'video.mp4', mimetype: 'video/mp4' }, thumbnail_image: { url: 'still.jpg', mimetype: 'image/jpeg' } } };
+  assert.equal(context.pickAssetViewUrl(asset), 'still.jpg');
+  assert.equal(context.pickAssetThumbUrl(asset), 'still.jpg');
+  delete asset.asset_urls.thumbnail_image;
+  assert.equal(context.pickAssetViewUrl(asset), null);
+  assert.equal(context.pickAssetThumbUrl(asset), null);
+  assert.equal(context.pickAssetViewUrl({ asset_urls: { original: { url: 'photo.jpg', mimetype: 'image/jpeg' } } }), 'photo.jpg');
+});
