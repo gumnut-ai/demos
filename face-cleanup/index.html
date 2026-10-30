@@ -130,6 +130,8 @@
   }
   .face-img-wrap img { width: 100%; height: 100%; object-fit: cover; }
   .face-img-wrap.empty { color: var(--muted); font-size: 12px; }
+  .face-img-wrap.expandable { cursor: zoom-in; }
+  .face-img-wrap.expandable:hover { outline: 2px solid var(--accent); }
   /* Parent-asset thumbnail. Sized by natural aspect at height 220 so the
      bbox overlay (positioned in %) lines up with the rendered image.
      Very wide assets cap at max-width: 600px (rare; height shrinks if hit). */
@@ -1874,6 +1876,7 @@ const AUDIT_LOG_SCHEMA = 'face-review-log/1';
 const AUDIT_REPEAT_RATE = 0.05;
 const AUDIT_REPEAT_MIN_GAP = 20;
 const AUDIT_CLUSTER_FACES = 12;
+const AUDIT_PRELOAD_ITEMS = 2;
 // IDs reach API paths, so a queue file cannot smuggle in other routes.
 const AUDIT_ID = /^[A-Za-z0-9_-]+$/;
 // A verdict needs its evidence on screen; unsure and skip stay available
@@ -2024,6 +2027,7 @@ function auditBegin(queue) {
     queue,
     schedule: auditSchedule(queue.queue_id, queue.items),
     entries: saved?.entries ?? [],
+    clusterPages: new Map(),
     busy: false, evidenceReady: false, undoArmed: false, notice: null, renderToken: 0,
   };
   localStorage.setItem(LS_KEY_AUDIT_ACTIVE, queue.queue_id);
@@ -2181,6 +2185,19 @@ function auditShowImage(host, url, alt) {
   });
 }
 
+// Every evidence thumbnail opens its photo, for a larger view in context.
+function auditMakeExpandable(host, faceId) {
+  host.classList.add('expandable');
+  host.title = 'Show photo';
+  host.onclick = () => auditExpandFace(faceId);
+}
+
+async function auditClusterPage(personId, libraryId) {
+  const pages = state.audit.clusterPages;
+  if (!pages.has(personId)) pages.set(personId, await state.client.listPersonFaces(personId, libraryId, AUDIT_CLUSTER_FACES));
+  return pages.get(personId);
+}
+
 // Each loader captures its elements before awaiting: a faster decision can
 // replace the card, and a late result must not land on the next item.
 async function auditShowPerson(personId) {
@@ -2189,6 +2206,7 @@ async function auditShowPerson(personId) {
   try {
     const person = await ensurePerson(personId);
     name.textContent = person.name ?? UNNAMED_LABEL;
+    if (person.thumbnail_face_id) auditMakeExpandable(host, person.thumbnail_face_id);
     const url = person.asset_urls?.thumbnail?.url;
     if (url && await auditShowImage(host, url, 'candidate person')) return true;
     if (!url) host.textContent = 'no thumbnail';
@@ -2205,6 +2223,7 @@ async function auditShowFace(faceId, libraryId) {
   try {
     const face = await ensureFace(faceId, libraryId);
     const url = face.asset_urls?.thumbnail?.url;
+    auditMakeExpandable(host, faceId);
     if (url) return await auditShowImage(host, url, 'face crop');
     host.textContent = 'no thumbnail';
   } catch (e) {
@@ -2217,20 +2236,56 @@ async function auditShowFace(faceId, libraryId) {
 async function auditShowCluster(personId, libraryId) {
   const host = document.getElementById('audit-cluster');
   try {
-    const page = await state.client.listPersonFaces(personId, libraryId, AUDIT_CLUSTER_FACES);
-    const urls = (page.data ?? []).map(face => face.asset_urls?.thumbnail?.url).filter(Boolean);
-    host.textContent = urls.length ? '' : 'no faces';
-    const shown = await Promise.all(urls.map(url => {
+    const page = await auditClusterPage(personId, libraryId);
+    const faces = (page.data ?? []).filter(face => face.asset_urls?.thumbnail?.url);
+    host.textContent = faces.length ? '' : 'no faces';
+    const shown = await Promise.all(faces.map(face => {
       const tile = document.createElement('div');
       tile.className = 'face-img-wrap';
       host.appendChild(tile);
-      return auditShowImage(tile, url, 'source face');
+      auditMakeExpandable(tile, face.id);
+      return auditShowImage(tile, face.asset_urls.thumbnail.url, 'source face');
     }));
     return shown.some(Boolean);
   } catch (e) {
     host.textContent = 'load failed';
     console.warn('Audit cluster failed to load', e);
     return false;
+  }
+}
+
+function auditPreloadImage(url) {
+  if (url) new Image().src = url;
+}
+
+// Best effort: an item's own render reports any failure.
+async function auditPreloadItem(item, libraryId) {
+  try {
+    if (item.candidate_person_id) {
+      const person = await ensurePerson(item.candidate_person_id);
+      auditPreloadImage(person.asset_urls?.thumbnail?.url);
+    }
+    if (item.kind === 'cluster') {
+      const page = await auditClusterPage(item.source_person_id, libraryId);
+      (page.data ?? []).forEach(face => auditPreloadImage(face.asset_urls?.thumbnail?.url));
+      return;
+    }
+    const face = await ensureFace(item.face_id, libraryId);
+    auditPreloadImage(face.asset_urls?.thumbnail?.url);
+    const asset = await ensureAsset(face.asset_id, libraryId);
+    auditPreloadImage(pickAssetViewUrl(asset));
+  } catch (e) {
+    console.warn('Audit preload failed', e);
+  }
+}
+
+// Warms the shown item's photo and the items after it, once the shown item
+// has loaded, so that a decision reveals the next item at once.
+function auditPreload() {
+  const { schedule, queue } = state.audit;
+  const start = auditDecided().length;
+  for (const { item } of schedule.slice(start, start + 1 + AUDIT_PRELOAD_ITEMS)) {
+    auditPreloadItem(item, queue.library_id);
   }
 }
 
@@ -2284,15 +2339,21 @@ function renderAudit() {
     if (state.audit !== audit || audit.renderToken !== token) return;
     audit.evidenceReady = shown.every(Boolean);
     auditRefreshControls();
+    auditPreload();
   });
 }
 
-async function auditShowPhoto() {
+function auditShowPhoto() {
+  const item = state.audit && auditCurrent()?.item;
+  return item?.kind === 'face' ? auditExpandFace(item.face_id) : undefined;
+}
+
+async function auditExpandFace(faceId) {
   const audit = state.audit;
   const item = audit && auditCurrent()?.item;
-  if (item?.kind !== 'face') return;
+  if (!item) return;
   try {
-    const face = await ensureFace(item.face_id, audit.queue.library_id);
+    const face = await ensureFace(faceId, audit.queue.library_id);
     const asset = await ensureAsset(face.asset_id, audit.queue.library_id);
     if (state.audit === audit && auditCurrent()?.item === item) openLightbox(asset, face.bounding_box);
   } catch (e) {

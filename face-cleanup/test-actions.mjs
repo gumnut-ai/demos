@@ -482,9 +482,12 @@ function auditFixture(items, { owners = {}, fetchResult, storage = new Map(), fa
   });
   const server = new Map(Object.entries(owners));
   const state = { libraries: [{ id: 'lib_test' }], faceCache: new Map(), assetCache: new Map(), personCache: new Map(), auditOpen: true, audit: null };
+  const preloaded = [];
+  const opened = [];
   class TestBlob { constructor(parts) { this.text = parts.join(''); } }
+  class TestImage { set src(url) { preloaded.push(url); } }
   const context = createContext({
-    state, AbortController, setTimeout, clearTimeout, URLSearchParams, REQUEST_TIMEOUT_MS: 1000,
+    state, AbortController, setTimeout, clearTimeout, URLSearchParams, REQUEST_TIMEOUT_MS: 1000, Image: TestImage,
     UNNAMED_LABEL: '(unnamed)', Blob: TestBlob, console: { error() {}, warn() {} }, JSON,
     URL: { createObjectURL: blob => { downloads.push({ blob }); return 'blob:test'; }, revokeObjectURL() {} },
     localStorage: {
@@ -501,9 +504,10 @@ function auditFixture(items, { owners = {}, fetchResult, storage = new Map(), fa
         return el;
       },
     },
-    closeLightbox() {}, openLightbox() {}, toast: message => messages.push(message),
-    ensureFace: async id => ({ asset_urls: { thumbnail: { url: id.includes('broken') ? 'https://cdn.example/broken.jpg' : 'https://cdn.example/face.jpg' } } }),
-    ensureAsset: async () => ({}), ensurePerson: async () => ({ name: 'Candidate' }),
+    closeLightbox() {}, openLightbox: (asset, bbox) => opened.push({ asset, bbox }), toast: message => messages.push(message),
+    ensureFace: async id => ({ asset_id: `asset_${id}`, bounding_box: { id }, asset_urls: { thumbnail: { url: id.includes('broken') ? 'https://cdn.example/broken.jpg' : `https://cdn.example/${id}.jpg` } } }),
+    ensureAsset: async id => ({ id }), ensurePerson: async () => ({ name: 'Candidate', thumbnail_face_id: 'face_thumbnail' }),
+    pickAssetViewUrl: asset => `https://cdn.example/${asset.id}.jpg`,
     auditLoadPanel: {}, auditReview: {}, reviewBusy: () => false,
     fetch: async (url, init) => {
       requests.push({ url, method: init.method, body: init.body ? JSON.parse(init.body) : undefined });
@@ -513,7 +517,7 @@ function auditFixture(items, { owners = {}, fetchResult, storage = new Map(), fa
         if (result) return result;
       }
       if (init.method === 'PATCH') server.set(faceId, JSON.parse(init.body).person_id);
-      if (faceId === 'faces') return new Response(JSON.stringify({ data: [{ asset_urls: { thumbnail: { url: 'https://cdn.example/source.jpg' } } }] }));
+      if (faceId === 'faces') return new Response(JSON.stringify({ data: [{ id: 'face_source', asset_urls: { thumbnail: { url: 'https://cdn.example/source.jpg' } } }] }));
       return new Response(JSON.stringify({ id: faceId, person_id: server.get(faceId) ?? null }));
     },
   });
@@ -523,8 +527,50 @@ function auditFixture(items, { owners = {}, fetchResult, storage = new Map(), fa
   const decide = async outcome => { await settle(); await context.auditDecide(outcome); await settle(); };
   const writes = () => requests.filter(r => r.method === 'PATCH');
   const clearRequests = () => { requests.length = 0; };
-  return { state, context, requests, messages, downloads, storage, server, elements, begin, decide, writes, clearRequests, settle, log: () => context.auditLog(new Date('2026-01-02T03:04:05Z')) };
+  return { state, context, requests, messages, downloads, storage, server, elements, begin, decide, writes, clearRequests, settle, preloaded, opened, log: () => context.auditLog(new Date('2026-01-02T03:04:05Z')) };
 }
+
+test('audit: the shown item and the next two load ahead, with their photos', async () => {
+  const f = auditFixture([faceItem('one'), faceItem('two'), faceItem('three'), faceItem('four')]);
+  await f.begin();
+  const faces = f.state.audit.schedule.slice(0, 3).map(slot => slot.item.face_id);
+  for (const id of faces) {
+    assert.ok(f.preloaded.includes(`https://cdn.example/${id}.jpg`), `${id} thumbnail`);
+    assert.ok(f.preloaded.includes(`https://cdn.example/asset_${id}.jpg`), `${id} photo`);
+  }
+  const later = f.state.audit.schedule[3].item.face_id;
+  assert.ok(!f.preloaded.some(url => url.includes(later)));
+});
+
+test('audit: a cluster read for loading ahead is not fetched again when shown', async () => {
+  const f = auditFixture([clusterItem('one')]);
+  await f.begin();
+  assert.equal(f.requests.length, 1);
+  assert.ok(f.preloaded.includes('https://cdn.example/source.jpg'));
+});
+
+test('audit: a failed preload leaves the review usable', async () => {
+  const f = auditFixture([faceItem('one'), faceItem('two')]);
+  f.context.ensureAsset = async () => { throw new Error('offline'); };
+  await f.begin();
+  assert.equal(f.state.audit.evidenceReady, true);
+  assert.equal(f.messages.length, 0);
+});
+
+test('audit: face, cluster and candidate thumbnails each open their own photo', async () => {
+  const f = auditFixture([faceItem('one'), clusterItem('two')]);
+  await f.begin();
+  for (let shown = 0; shown < 2; shown += 1) {
+    const { item } = f.state.audit.schedule[shown];
+    const host = item.kind === 'face' ? f.elements.get('audit-face') : f.elements.get('audit-cluster').children[0];
+    await host.onclick();
+    await f.elements.get('audit-person-thumb').onclick();
+    const faceId = item.kind === 'face' ? item.face_id : 'face_source';
+    assert.deepEqual(Array.from(f.opened.splice(0), o => o.bbox.id), [faceId, 'face_thumbnail']);
+    assert.equal(f.opened.length, 0);
+    await f.decide('skip');
+  }
+});
 
 for (const [name, outcome, owner, write, body] of [
   ['correct on an unassigned face assigns', 'correct', null, 'assignment', { person_id: 'person_candidate' }],
