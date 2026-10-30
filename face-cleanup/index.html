@@ -220,6 +220,17 @@
   .toast.error { border-color: var(--bad); }
   .toast.success { border-color: var(--good); }
   .hint { color: var(--muted); font-size: 12px; margin-top: 6px; }
+  .audit-compare { display: flex; gap: 16px; align-items: flex-start; flex-wrap: wrap; }
+  .audit-grid {
+    width: min(100%, 472px); display: grid; gap: 4px;
+    grid-template-columns: repeat(auto-fill, minmax(112px, 1fr));
+  }
+  .audit-grid .face-img-wrap { width: 100%; height: auto; }
+  .audit-alert {
+    border: 1px solid var(--warn); border-radius: 8px; padding: 10px 12px;
+    margin-bottom: 12px; background: rgba(232, 176, 75, 0.18);
+  }
+  .audit-alert.error { border-color: var(--bad); background: rgba(232, 91, 107, 0.18); }
   details summary { cursor: pointer; color: var(--muted); }
   details[open] summary { margin-bottom: 8px; }
 
@@ -233,6 +244,7 @@
   <h1>Face cleanup</h1>
   <span class="subject" id="subject-label">Loading…</span>
   <a href="#" class="change-subject" id="change-subject" hidden>Pick another person ↗</a>
+  <a href="#" class="change-subject" id="audit-link" hidden>Audit a queue ↗</a>
   <div class="filter-tabs" id="filter-tabs"></div>
 </header>
 
@@ -307,6 +319,33 @@
       <button id="detach-btn" class="danger">Detach (D)</button>
       <button id="next-btn">Next →</button>
       <button id="undo-btn" disabled>Undo (Z)</button>
+    </div>
+  </div>
+
+  <!-- Audit mode — reviews a prepared queue and exports a decision log. -->
+  <div class="config-panel" id="audit-load-panel" hidden>
+    <h2>Audit a review queue</h2>
+    <div class="row">
+      <label for="audit-file">Queue file</label>
+      <input type="file" id="audit-file" accept=".json,application/json" />
+    </div>
+    <p class="hint">
+      The file is read in this browser and never uploaded. Correct and Wrong
+      verdicts can edit faces immediately; every other outcome only updates the
+      local log. Choosing the same queue again resumes it.
+    </p>
+    <p class="hint" id="audit-load-error" role="alert"></p>
+  </div>
+
+  <div id="audit-review" hidden>
+    <div class="progress" id="audit-progress"></div>
+    <div class="audit-alert" id="audit-alert" role="alert" hidden></div>
+    <div id="audit-card-host"></div>
+    <div class="actions" id="audit-actions"></div>
+    <div class="actions">
+      <button id="audit-photo-btn">Show photo (P)</button>
+      <button id="audit-undo-btn">Undo (Z)</button>
+      <button id="audit-export-btn">Export log (E)</button>
     </div>
   </div>
 </main>
@@ -426,6 +465,15 @@ class Client {
     return this._req('PATCH', `/api/faces/${faceId}?library_id=${encodeURIComponent(libraryId)}`,
       { person_id: personId });
   }
+  // Faces for a cluster-review grid. The lean list response carries each
+  // face's crop URL; audit items need no cluster_assignment diagnostics.
+  listPersonFaces(personId, libraryId, limit) {
+    const qs = new URLSearchParams();
+    qs.set('person_id', personId);
+    qs.set('library_id', libraryId);
+    qs.set('limit', String(limit));
+    return this._req('GET', `/api/faces?${qs}`);
+  }
   listFacesByIds(faceIds, libraryId) {
     const qs = new URLSearchParams();
     faceIds.forEach(id => qs.append('ids', id));
@@ -522,6 +570,8 @@ const state = {
   // from faceCache so a synthetic entry can't hide the asset_urls a
   // later ensureFace needs. Used by currentPersonId() to drive Undo.
   lastAssigned: new Map(),
+  auditOpen: false,   // audit mode owns the page, with or without a loaded queue
+  audit: null,        // loaded queue, schedule, and log; see auditBegin()
 };
 
 // Default name to render when a Person has no name set — same string in
@@ -900,16 +950,16 @@ function applyFilter(filter) {
 }
 
 // ---------- prefetch helpers ----------
-async function ensureFace(faceId) {
+async function ensureFace(faceId, libraryId = state.snapshot.library_id) {
   if (state.faceCache.has(faceId)) return state.faceCache.get(faceId);
-  const r = await state.client.getFace(faceId, state.snapshot.library_id);
+  const r = await state.client.getFace(faceId, libraryId);
   state.faceCache.set(faceId, r);
   return r;
 }
 
-async function ensureAsset(assetId) {
+async function ensureAsset(assetId, libraryId = state.snapshot.library_id) {
   if (state.assetCache.has(assetId)) return state.assetCache.get(assetId);
-  const resp = await state.client.listAssetsByIds([assetId], state.snapshot.library_id);
+  const resp = await state.client.listAssetsByIds([assetId], libraryId);
   const a = resp && resp.data && resp.data[0];
   if (a) state.assetCache.set(assetId, a);
   return a;
@@ -1081,6 +1131,9 @@ const personPanel = document.getElementById('person-panel');
 const progress = document.getElementById('progress');
 const faceHost = document.getElementById('face-card-host');
 const undoBtn = document.getElementById('undo-btn');
+const auditLink = document.getElementById('audit-link');
+const auditLoadPanel = document.getElementById('audit-load-panel');
+const auditReview = document.getElementById('audit-review');
 
 // Hide every picker stage. The flow function then unhides exactly one at
 // a time — keeps state.* and DOM in sync without ad-hoc toggles.
@@ -1089,6 +1142,8 @@ function hideAllPanels() {
   libraryPanel.hidden = true;
   personPanel.hidden = true;
   content.hidden = true;
+  auditLoadPanel.hidden = true;
+  auditReview.hidden = true;
 }
 
 function renderTabs() {
@@ -1790,6 +1845,7 @@ window.addEventListener('keydown', (e) => {
     if (e.key === 'Escape') { e.preventDefault(); closeLightbox(); }
     return;
   }
+  if (state.auditOpen) { auditKeydown(e); return; }
   if (state.index >= state.faces.length) {
     if (e.key === 'ArrowLeft') navBack();
     return;
@@ -1807,6 +1863,527 @@ window.addEventListener('keydown', (e) => {
   else if (e.key === 'ArrowLeft') { e.preventDefault(); navBack(); }
 });
 
+// ---------- audit mode ----------
+// Reviews a prepared queue and logs every decision, including the ones that
+// leave no server record. Shows only the evidence for each verdict: distance,
+// stratum, provenance, and repeat status stay hidden to avoid anchoring.
+const LS_KEY_AUDIT_ACTIVE = 'fcd:audit:active';
+const auditKey = (queueId) => `fcd:audit:${queueId}`;
+const AUDIT_QUEUE_SCHEMA = 'face-review-queue/1';
+const AUDIT_LOG_SCHEMA = 'face-review-log/1';
+const AUDIT_REPEAT_RATE = 0.05;
+const AUDIT_REPEAT_MIN_GAP = 20;
+const AUDIT_CLUSTER_FACES = 12;
+// IDs reach API paths, so a queue file cannot smuggle in other routes.
+const AUDIT_ID = /^[A-Za-z0-9_-]+$/;
+// A verdict needs its evidence on screen; unsure and skip stay available
+// when images fail to load.
+const AUDIT_OUTCOMES = {
+  face: [
+    { outcome: 'correct', key: 'a', label: 'Correct (A)', verdict: true, needsCandidate: true, style: 'primary' },
+    { outcome: 'wrong', key: 'd', label: 'Wrong (D)', verdict: true, needsCandidate: true, style: 'danger' },
+    { outcome: 'not_a_face', key: 'n', label: 'Not a face (N)', verdict: true },
+    { outcome: 'unsure', key: 'u', label: 'Unsure (U)' },
+    { outcome: 'skip', key: 's', label: 'Skip (S)' },
+  ],
+  cluster: [
+    { outcome: 'same_person', key: 'a', label: 'Same person (A)', verdict: true, style: 'primary' },
+    { outcome: 'different', key: 'd', label: 'Different (D)', verdict: true, style: 'danger' },
+    { outcome: 'mixed', key: 'm', label: 'Mixed (M)', verdict: true },
+    { outcome: 'unsure', key: 'u', label: 'Unsure (U)' },
+    { outcome: 'skip', key: 's', label: 'Skip (S)' },
+  ],
+};
+
+function auditOutcomes(item) {
+  return AUDIT_OUTCOMES[item.kind].filter(o => !o.needsCandidate || item.candidate_person_id);
+}
+
+// Keeps only the fields the review uses, so distance never reaches the UI.
+function auditValidateQueue(queue) {
+  if (queue?.schema !== AUDIT_QUEUE_SCHEMA) throw new Error(`Expected schema ${AUDIT_QUEUE_SCHEMA}`);
+  const requireId = (value, name, allowNull = false) => {
+    if (allowNull && value === null) return;
+    if (typeof value !== 'string' || !AUDIT_ID.test(value)) throw new Error(`Invalid ${name}`);
+  };
+  if (typeof queue.queue_id !== 'string' || !queue.queue_id) throw new Error('Invalid queue_id');
+  requireId(queue.library_id, 'library_id');
+  if (!Array.isArray(queue.items) || !queue.items.length) throw new Error('The queue has no items');
+  const itemIds = new Set();
+  const items = queue.items.map((item, index) => {
+    if (typeof item?.item_id !== 'string' || !item.item_id) throw new Error(`Item ${index}: invalid item_id`);
+    if (itemIds.has(item.item_id)) throw new Error(`Item ${index}: duplicate item_id`);
+    itemIds.add(item.item_id);
+    if (typeof item.stratum !== 'string') throw new Error(`Item ${index}: invalid stratum`);
+    const base = { item_id: item.item_id, stratum: item.stratum, kind: item.kind };
+    if (item.kind === 'face') {
+      requireId(item.face_id, `face_id on item ${index}`);
+      requireId(item.candidate_person_id, `candidate_person_id on item ${index}`, true);
+      return { ...base, face_id: item.face_id, candidate_person_id: item.candidate_person_id };
+    }
+    if (item.kind === 'cluster') {
+      requireId(item.source_person_id, `source_person_id on item ${index}`);
+      requireId(item.candidate_person_id, `candidate_person_id on item ${index}`);
+      return { ...base, source_person_id: item.source_person_id, candidate_person_id: item.candidate_person_id };
+    }
+    throw new Error(`Item ${index}: unknown kind`);
+  });
+  return { schema: queue.schema, queue_id: queue.queue_id, library_id: queue.library_id, items };
+}
+
+// FNV-1a seed and mulberry32 stream: the same queue always gets the same plan.
+function auditRandom(text) {
+  let seed = 0x811c9dc5;
+  for (let i = 0; i < text.length; i++) seed = Math.imul(seed ^ text.charCodeAt(i), 0x01000193);
+  return () => {
+    seed = (seed + 0x6d2b79f5) | 0;
+    let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+// Presentation order: every item once, plus hidden repeats. A repeat lands
+// after a later item, so inserting more repeats only widens its gap. Queues
+// shorter than the minimum gap have room for none.
+function auditSchedule(queueId, items) {
+  const random = auditRandom(queueId);
+  const eligible = items.map((_, i) => i).slice(0, Math.max(0, items.length - AUDIT_REPEAT_MIN_GAP + 1));
+  for (let i = eligible.length - 1; i > 0; i--) {
+    const j = Math.floor(random() * (i + 1));
+    [eligible[i], eligible[j]] = [eligible[j], eligible[i]];
+  }
+  const repeatsAfter = new Map();
+  for (const original of eligible.slice(0, Math.round(items.length * AUDIT_REPEAT_RATE))) {
+    const earliest = original + AUDIT_REPEAT_MIN_GAP - 1;
+    const after = earliest + Math.floor(random() * (items.length - earliest));
+    repeatsAfter.set(after, [...(repeatsAfter.get(after) ?? []), original]);
+  }
+  return items.flatMap((item, i) => [
+    { item, repeat_of: null },
+    ...(repeatsAfter.get(i) ?? []).map(original => ({ item: items[original], repeat_of: items[original].item_id })),
+  ]);
+}
+
+// A face assigned to someone other than the candidate stays put: rejecting
+// the candidate is no reason to detach a different person. So does a face
+// with no candidate, which has no target to write.
+function auditPlanWrite(item, outcome, currentPersonId) {
+  const candidate = item.candidate_person_id;
+  if (outcome === 'correct') {
+    return { write: currentPersonId === candidate ? 'confirmation' : 'assignment', personId: candidate };
+  }
+  if (outcome === 'wrong' && currentPersonId === candidate) return { write: 'unlink', personId: null };
+  return { write: 'none' };
+}
+
+function auditMayWrite(slot, outcome) {
+  return !slot.repeat_of && slot.item.kind === 'face' && Boolean(slot.item.candidate_person_id)
+    && (outcome === 'correct' || outcome === 'wrong');
+}
+
+function auditDecided() {
+  return state.audit.entries.filter(entry => entry.write !== 'failed');
+}
+
+// Decisions run in order and Undo is last-in-first-out, so the number of
+// decided entries is the position. A failed attempt leaves it unchanged.
+function auditCurrent() {
+  return state.audit.schedule[auditDecided().length] ?? null;
+}
+
+function auditSave() {
+  const { queue, entries } = state.audit;
+  try {
+    localStorage.setItem(auditKey(queue.queue_id), JSON.stringify({ queue, entries }));
+  } catch (e) {
+    state.audit.notice = { error: true, text: `Progress could not be saved in this browser: ${e.message}. Export the log before closing this tab.` };
+    console.error(e);
+  }
+}
+
+function auditLoadRecord(queueId) {
+  try {
+    const record = JSON.parse(localStorage.getItem(auditKey(queueId)));
+    return record && Array.isArray(record.entries) ? record : null;
+  } catch { return null; }
+}
+
+function auditBegin(queue) {
+  const saved = auditLoadRecord(queue.queue_id);
+  if (saved && JSON.stringify(saved.queue) !== JSON.stringify(queue)) {
+    throw new Error(`Saved progress for queue ${queue.queue_id} used different items. Give a changed queue a new queue_id.`);
+  }
+  if (!state.libraries.some(library => library.id === queue.library_id)) {
+    throw new Error(`This API key cannot read library ${queue.library_id}`);
+  }
+  state.faceCache.clear();
+  state.assetCache.clear();
+  state.personCache.clear();
+  state.audit = {
+    queue,
+    schedule: auditSchedule(queue.queue_id, queue.items),
+    entries: saved?.entries ?? [],
+    busy: false, evidenceReady: false, undoArmed: false, notice: null, renderToken: 0,
+  };
+  localStorage.setItem(LS_KEY_AUDIT_ACTIVE, queue.queue_id);
+  auditSave();
+  renderAudit();
+}
+
+async function auditDecide(outcome) {
+  const audit = state.audit;
+  if (!audit || audit.busy) return;
+  const slot = auditCurrent();
+  const option = slot && auditOutcomes(slot.item).find(o => o.outcome === outcome);
+  if (!option || (option.verdict && !audit.evidenceReady)) return;
+  const { item, repeat_of } = slot;
+  const entry = {
+    item_id: item.item_id, stratum: item.stratum, kind: item.kind, outcome, repeat_of,
+    decided_at: null, write: 'none', error: null,
+  };
+  audit.undoArmed = false;
+  audit.notice = null;
+  audit.busy = true;
+  auditRefreshControls();
+  try {
+    if (auditMayWrite(slot, outcome)) {
+      // Read fresh: an earlier decision or another client may have moved it.
+      const face = await state.client.getFace(item.face_id, audit.queue.library_id);
+      const previous = face.person_id ?? null;
+      const plan = auditPlanWrite(item, outcome, previous);
+      if (plan.write !== 'none') {
+        const saved = await state.client.updateFace(item.face_id, audit.queue.library_id, plan.personId);
+        if ((saved.person_id ?? null) !== plan.personId) {
+          throw new Error('The returned assignment differs from the requested one');
+        }
+        entry.write = plan.write;
+        entry.undo_person_id = previous;
+      }
+    }
+  } catch (e) {
+    entry.write = 'failed';
+    entry.error = e.message;
+    audit.notice = { error: true, text: `Write failed, so this item is still undecided: ${e.message}. The request may have saved. Decide again to retry.` };
+    toast('Write failed. This item is still undecided.', 'error', 10000);
+    console.error(e);
+  }
+  entry.decided_at = new Date().toISOString();
+  audit.entries.push(entry);
+  audit.busy = false;
+  auditSave();
+  renderAudit();
+}
+
+function auditUndoNotice(entry) {
+  if (entry.write === 'confirmation') {
+    return 'Undo reopens this item only. The manual confirmation stays saved on the server.';
+  }
+  const effect = entry.write === 'unlink' ? 'puts the face back on the candidate person'
+    : entry.undo_person_id === null ? 'clears the assignment, which can record a rejection of the candidate person'
+    : 'returns the face to its previous person';
+  return `Undo saves a new ordinary edit that ${effect}. It does not reverse server history or restore automatic provenance.`;
+}
+
+// Undo removes the newest decision from the log. A decision that wrote to the
+// server is explained first and needs a second press.
+async function auditUndo() {
+  const audit = state.audit;
+  if (!audit || audit.busy) return;
+  const entry = auditDecided().at(-1);
+  if (!entry) return;
+  if (entry.write !== 'none' && !audit.undoArmed) {
+    audit.undoArmed = true;
+    audit.notice = { error: false, text: `${auditUndoNotice(entry)} Press Z again to continue.` };
+    auditRefreshControls();
+    return;
+  }
+  audit.undoArmed = false;
+  audit.notice = null;
+  audit.busy = true;
+  auditRefreshControls();
+  let failure = null;
+  try {
+    if (entry.write === 'assignment' || entry.write === 'unlink') {
+      const faceId = audit.queue.items.find(item => item.item_id === entry.item_id).face_id;
+      const saved = await state.client.updateFace(faceId, audit.queue.library_id, entry.undo_person_id);
+      if ((saved.person_id ?? null) !== entry.undo_person_id) {
+        throw new Error('The returned assignment differs from the requested one');
+      }
+    }
+  } catch (e) {
+    failure = e;
+  }
+  audit.busy = false;
+  if (failure) {
+    // A lost response cannot prove whether the edit saved, so keep the
+    // decision and leave Undo available.
+    audit.notice = { error: true, text: `Undo failed, so the decision stays in the log: ${failure.message}. The request may have saved. Reload to check the face before retrying.` };
+    console.error(failure);
+  } else {
+    audit.entries.splice(audit.entries.lastIndexOf(entry), 1);
+    auditSave();
+  }
+  renderAudit();
+}
+
+function auditLog(exportedAt = new Date()) {
+  const { queue, entries } = state.audit;
+  return {
+    schema: AUDIT_LOG_SCHEMA,
+    queue_id: queue.queue_id,
+    exported_at: exportedAt.toISOString(),
+    entries: entries.map(({ item_id, stratum, kind, outcome, repeat_of, decided_at, write, error }) => (
+      { item_id, stratum, kind, outcome, repeat_of, decided_at, write, error }
+    )),
+  };
+}
+
+function auditExport() {
+  if (!state.audit) return;
+  const url = URL.createObjectURL(new Blob([JSON.stringify(auditLog(), null, 2)], { type: 'application/json' }));
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = `face-review-log-${state.audit.queue.queue_id.replace(/[^A-Za-z0-9._-]/g, '_')}.json`;
+  link.click();
+  URL.revokeObjectURL(url);
+}
+
+function auditRefreshControls() {
+  const audit = state.audit;
+  const slot = auditCurrent();
+  const decided = auditDecided().length;
+  document.getElementById('audit-progress').innerHTML = `
+    <span><strong>${decided}</strong> of ${audit.schedule.length} decided</span>
+  `;
+  const alert = document.getElementById('audit-alert');
+  alert.hidden = !audit.notice;
+  alert.textContent = audit.notice?.text ?? '';
+  alert.classList.toggle('error', Boolean(audit.notice?.error));
+  const actions = document.getElementById('audit-actions');
+  for (const button of actions.children) {
+    button.disabled = audit.busy || (button.dataset.verdict === 'true' && !audit.evidenceReady);
+  }
+  document.getElementById('audit-photo-btn').hidden = slot?.item.kind !== 'face';
+  document.getElementById('audit-photo-btn').disabled = audit.busy;
+  document.getElementById('audit-undo-btn').disabled = audit.busy || decided === 0;
+}
+
+function auditShowImage(host, url, alt) {
+  return new Promise(resolve => {
+    const image = document.createElement('img');
+    image.alt = alt;
+    image.onload = () => resolve(true);
+    image.onerror = () => { host.textContent = 'load failed'; resolve(false); };
+    image.src = url;
+    host.classList.remove('empty');
+    host.replaceChildren(image);
+  });
+}
+
+// Each loader captures its elements before awaiting: a faster decision can
+// replace the card, and a late result must not land on the next item.
+async function auditShowPerson(personId) {
+  const name = document.getElementById('audit-person-name');
+  const host = document.getElementById('audit-person-thumb');
+  try {
+    const person = await ensurePerson(personId);
+    name.textContent = person.name ?? UNNAMED_LABEL;
+    const url = person.asset_urls?.thumbnail?.url;
+    if (url && await auditShowImage(host, url, 'candidate person')) return true;
+    if (!url) host.textContent = 'no thumbnail';
+    return Boolean(person.name);
+  } catch (e) {
+    host.textContent = 'load failed';
+    console.warn('Audit person failed to load', e);
+    return false;
+  }
+}
+
+async function auditShowFace(faceId, libraryId) {
+  const host = document.getElementById('audit-face');
+  try {
+    const face = await ensureFace(faceId, libraryId);
+    const url = face.asset_urls?.thumbnail?.url;
+    if (url) return await auditShowImage(host, url, 'face crop');
+    host.textContent = 'no thumbnail';
+  } catch (e) {
+    host.textContent = 'load failed';
+    console.warn('Audit face failed to load', e);
+  }
+  return false;
+}
+
+async function auditShowCluster(personId, libraryId) {
+  const host = document.getElementById('audit-cluster');
+  try {
+    const page = await state.client.listPersonFaces(personId, libraryId, AUDIT_CLUSTER_FACES);
+    const urls = (page.data ?? []).map(face => face.asset_urls?.thumbnail?.url).filter(Boolean);
+    host.textContent = urls.length ? '' : 'no faces';
+    const shown = await Promise.all(urls.map(url => {
+      const tile = document.createElement('div');
+      tile.className = 'face-img-wrap';
+      host.appendChild(tile);
+      return auditShowImage(tile, url, 'source face');
+    }));
+    return shown.some(Boolean);
+  } catch (e) {
+    host.textContent = 'load failed';
+    console.warn('Audit cluster failed to load', e);
+    return false;
+  }
+}
+
+function renderAudit() {
+  const audit = state.audit;
+  closeLightbox();
+  const token = audit.renderToken += 1;
+  audit.evidenceReady = false;
+  const slot = auditCurrent();
+  const actions = document.getElementById('audit-actions');
+  const host = document.getElementById('audit-card-host');
+  actions.replaceChildren();
+  if (!slot) {
+    host.innerHTML = `<div class="card">Review complete. Export the log to keep it.</div>`;
+    auditRefreshControls();
+    return;
+  }
+  for (const { outcome, label, verdict, style } of auditOutcomes(slot.item)) {
+    const button = document.createElement('button');
+    button.textContent = label;
+    button.dataset.verdict = String(Boolean(verdict));
+    if (style) button.className = style;
+    button.onclick = () => auditDecide(outcome);
+    actions.appendChild(button);
+  }
+  const { item } = slot;
+  const candidate = item.candidate_person_id ? `
+    <div>
+      <h3 class="candidates-header">Candidate person</h3>
+      <div class="face-img-wrap empty" id="audit-person-thumb">loading…</div>
+      <div class="candidate-name" id="audit-person-name"></div>
+    </div>
+  ` : '';
+  host.innerHTML = `
+    <div class="card"><div class="audit-compare">
+      <div>
+        <h3 class="candidates-header">${item.kind === 'cluster' ? 'Cluster faces' : 'Face'}</h3>
+        ${item.kind === 'cluster'
+          ? `<div class="audit-grid" id="audit-cluster">loading…</div>`
+          : `<div class="face-img-wrap empty" id="audit-face">loading…</div>`}
+      </div>
+      ${candidate}
+    </div></div>
+  `;
+  auditRefreshControls();
+  const libraryId = audit.queue.library_id;
+  Promise.all([
+    item.kind === 'cluster' ? auditShowCluster(item.source_person_id, libraryId) : auditShowFace(item.face_id, libraryId),
+    item.candidate_person_id ? auditShowPerson(item.candidate_person_id) : true,
+  ]).then(shown => {
+    if (state.audit !== audit || audit.renderToken !== token) return;
+    audit.evidenceReady = shown.every(Boolean);
+    auditRefreshControls();
+  });
+}
+
+async function auditShowPhoto() {
+  const audit = state.audit;
+  const item = audit && auditCurrent()?.item;
+  if (item?.kind !== 'face') return;
+  try {
+    const face = await ensureFace(item.face_id, audit.queue.library_id);
+    const asset = await ensureAsset(face.asset_id, audit.queue.library_id);
+    if (state.audit === audit && auditCurrent()?.item === item) openLightbox(asset, face.bounding_box);
+  } catch (e) {
+    toast(`Photo failed to load: ${e.message}`, 'error', 6000);
+  }
+}
+
+function auditKeydown(e) {
+  if (!state.audit || e.repeat || e.metaKey || e.ctrlKey || e.altKey) return;
+  const key = e.key.toLowerCase();
+  const item = auditCurrent()?.item;
+  const option = item && auditOutcomes(item).find(o => o.key === key);
+  if (option) { e.preventDefault(); auditDecide(option.outcome); }
+  else if (key === 'z') { e.preventDefault(); auditUndo(); }
+  else if (key === 'e') { e.preventDefault(); auditExport(); }
+  else if (key === 'p') { e.preventDefault(); auditShowPhoto(); }
+}
+
+function auditLoadFailed(message) {
+  document.getElementById('audit-load-error').textContent = message;
+  auditLoadPanel.hidden = false;
+  auditReview.hidden = true;
+}
+
+function auditStart(queue) {
+  try {
+    document.getElementById('audit-load-error').textContent = '';
+    auditBegin(queue);
+    auditLoadPanel.hidden = true;
+    auditReview.hidden = false;
+  } catch (e) {
+    localStorage.removeItem(LS_KEY_AUDIT_ACTIVE);
+    auditLoadFailed(e.message);
+  }
+}
+
+function auditReadFile(file) {
+  const reader = new FileReader();
+  reader.onload = () => {
+    try {
+      auditStart(auditValidateQueue(JSON.parse(reader.result)));
+    } catch (e) {
+      auditLoadFailed(`Could not load the queue: ${e.message}`);
+    }
+  };
+  reader.onerror = () => auditLoadFailed('Could not read the file.');
+  reader.readAsText(file);
+}
+
+function openAudit() {
+  state.auditOpen = true;
+  hideAllPanels();
+  changeSubjectLink.hidden = true;
+  subjectLabel.textContent = 'Audit review';
+  tabs.style.display = 'none';
+  auditLink.textContent = 'Back to cleanup ↗';
+  auditLink.hidden = false;
+  auditLoadPanel.hidden = false;
+  const activeId = localStorage.getItem(LS_KEY_AUDIT_ACTIVE);
+  const saved = activeId ? auditLoadRecord(activeId) : null;
+  if (saved) auditStart(saved.queue);
+}
+
+function leaveAudit() {
+  if (state.audit?.busy) return;
+  state.auditOpen = false;
+  state.audit = null;
+  localStorage.removeItem(LS_KEY_AUDIT_ACTIVE);
+  closeLightbox();
+  subjectLabel.textContent = '';
+  tabs.style.display = '';
+  auditLink.textContent = 'Audit a queue ↗';
+  runStage();
+}
+
+function initAudit() {
+  auditLink.onclick = (e) => {
+    e.preventDefault();
+    if (state.auditOpen) leaveAudit();
+    else if (!reviewBusy()) openAudit();
+  };
+  document.getElementById('audit-file').onchange = (e) => {
+    const [file] = e.target.files;
+    e.target.value = '';
+    if (file) auditReadFile(file);
+  };
+  document.getElementById('audit-photo-btn').onclick = auditShowPhoto;
+  document.getElementById('audit-undo-btn').onclick = auditUndo;
+  document.getElementById('audit-export-btn').onclick = auditExport;
+}
+
 // ---------- init / multi-stage flow ----------
 // Four stages, run in order; each is "skipped" if its prerequisites are
 // already satisfied (saved creds, single library, saved person). Going
@@ -1819,6 +2396,7 @@ async function init() {
   document.getElementById('library-continue').onclick = onLibraryContinue;
   document.getElementById('person-filter').oninput = renderPersonList;
   document.getElementById('include-manual').onchange = e => setIncludeManual(e.target.checked);
+  initAudit();
   document.getElementById('switch-library').onclick = (e) => {
     e.preventDefault();
     localStorage.removeItem(LS_KEY_LIBRARY_ID);
@@ -1847,6 +2425,7 @@ async function init() {
 async function runStage() {
   hideAllPanels();
   changeSubjectLink.hidden = true;
+  auditLink.hidden = true;
 
   // Stage A — credentials
   const base = localStorage.getItem(LS_KEY_API_BASE);
@@ -1877,6 +2456,13 @@ async function runStage() {
     return;
   }
 
+  // Audit mode takes its library from the queue, so it needs no saved
+  // library or person. An unfinished queue resumes after a reload.
+  if (localStorage.getItem(LS_KEY_AUDIT_ACTIVE)) {
+    openAudit();
+    return;
+  }
+
   // Resolve library: saved choice → still valid; one library → auto;
   // otherwise prompt.
   let libraryId = localStorage.getItem(LS_KEY_LIBRARY_ID);
@@ -1891,6 +2477,7 @@ async function runStage() {
   if (!libraryId) {
     renderLibraryPicker();
     libraryPanel.hidden = false;
+    auditLink.hidden = false;
     return;
   }
   state.libraryId = libraryId;
@@ -1902,6 +2489,7 @@ async function runStage() {
     // Unhide the panel before the fetch so the user sees the
     // "loading people…" hint instead of a blank page.
     personPanel.hidden = false;
+    auditLink.hidden = false;
     await loadAndRenderPersonPicker();
     return;
   }
@@ -1909,6 +2497,8 @@ async function runStage() {
 
   // Stage D — cleanup view
   await launchCleanup();
+  // Revealed only after loading so audit mode cannot race the cleanup view.
+  auditLink.hidden = false;
 }
 
 async function onSaveCreds() {

@@ -463,3 +463,385 @@ test('image selectors never use a video original when a larger still is missing'
   assert.equal(context.pickAssetThumbUrl(asset), null);
   assert.equal(context.pickAssetViewUrl({ asset_urls: { original: { url: 'photo.jpg', mimetype: 'image/jpeg' } } }), 'photo.jpg');
 });
+
+// Audit mode: run the shipped block against a synthetic queue and a fake API.
+const audit = html.slice(html.indexOf('// ---------- audit mode ----------'), html.indexOf('// ---------- init / multi-stage flow ----------'));
+
+const faceItem = (id, candidate = 'person_candidate') => ({ item_id: id, stratum: 'unassigned', kind: 'face', face_id: `face_${id}`, candidate_person_id: candidate, distance: 0.41 });
+const clusterItem = id => ({ item_id: id, stratum: 'unnamed', kind: 'cluster', source_person_id: 'person_source', candidate_person_id: 'person_candidate', distance: 0.31 });
+const queueOf = (items, queue_id = 'queue_test') => ({ schema: 'face-review-queue/1', queue_id, library_id: 'lib_test', items });
+
+function auditFixture(items, { owners = {}, fetchResult, storage = new Map(), failSave = false } = {}) {
+  const requests = [];
+  const messages = [];
+  const downloads = [];
+  const elements = new Map();
+  const element = () => ({
+    classList: { add() {}, remove() {}, toggle() {} }, dataset: {}, children: [],
+    appendChild(child) { this.children.push(child); }, replaceChildren(...children) { this.children = children; },
+  });
+  const server = new Map(Object.entries(owners));
+  const state = { libraries: [{ id: 'lib_test' }], faceCache: new Map(), assetCache: new Map(), personCache: new Map(), auditOpen: true, audit: null };
+  class TestBlob { constructor(parts) { this.text = parts.join(''); } }
+  const context = createContext({
+    state, AbortController, setTimeout, clearTimeout, URLSearchParams, REQUEST_TIMEOUT_MS: 1000,
+    UNNAMED_LABEL: '(unnamed)', Blob: TestBlob, console: { error() {}, warn() {} }, JSON,
+    URL: { createObjectURL: blob => { downloads.push({ blob }); return 'blob:test'; }, revokeObjectURL() {} },
+    localStorage: {
+      getItem: key => storage.get(key) ?? null, removeItem: key => storage.delete(key),
+      setItem: (key, value) => { if (failSave && key.startsWith('fcd:audit:queue')) throw new Error('quota'); storage.set(key, value); },
+    },
+    document: {
+      getElementById: id => elements.get(id) ?? elements.set(id, element()).get(id),
+      createElement: tag => {
+        const el = element();
+        if (tag === 'a') el.click = () => { downloads.at(-1).name = el.download; };
+        // Decode immediately so evidence becomes ready as it would in a browser.
+        if (tag === 'img') Object.defineProperty(el, 'src', { set(url) { setTimeout(() => (url.includes('broken') ? el.onerror : el.onload)(), 0); } });
+        return el;
+      },
+    },
+    closeLightbox() {}, openLightbox() {}, toast: message => messages.push(message),
+    ensureFace: async id => ({ asset_urls: { thumbnail: { url: id.includes('broken') ? 'https://cdn.example/broken.jpg' : 'https://cdn.example/face.jpg' } } }),
+    ensureAsset: async () => ({}), ensurePerson: async () => ({ name: 'Candidate' }),
+    auditLoadPanel: {}, auditReview: {}, reviewBusy: () => false,
+    fetch: async (url, init) => {
+      requests.push({ url, method: init.method, body: init.body ? JSON.parse(init.body) : undefined });
+      const faceId = new URL(url).pathname.split('/').pop();
+      if (fetchResult) {
+        const result = fetchResult(init, faceId);
+        if (result) return result;
+      }
+      if (init.method === 'PATCH') server.set(faceId, JSON.parse(init.body).person_id);
+      if (faceId === 'faces') return new Response(JSON.stringify({ data: [{ asset_urls: { thumbnail: { url: 'https://cdn.example/source.jpg' } } }] }));
+      return new Response(JSON.stringify({ id: faceId, person_id: server.get(faceId) ?? null }));
+    },
+  });
+  runInContext(`${client}\n${audit}\nstate.client = new Client('https://api.example', 'test');`, context);
+  const settle = () => new Promise(resolve => setTimeout(resolve, 5));
+  const begin = async (queue = queueOf(items)) => { context.auditBegin(context.auditValidateQueue(queue)); await settle(); };
+  const decide = async outcome => { await settle(); await context.auditDecide(outcome); await settle(); };
+  const writes = () => requests.filter(r => r.method === 'PATCH');
+  const clearRequests = () => { requests.length = 0; };
+  return { state, context, requests, messages, downloads, storage, server, elements, begin, decide, writes, clearRequests, settle, log: () => context.auditLog(new Date('2026-01-02T03:04:05Z')) };
+}
+
+for (const [name, outcome, owner, write, body] of [
+  ['correct on an unassigned face assigns', 'correct', null, 'assignment', { person_id: 'person_candidate' }],
+  ['correct on another owner assigns', 'correct', 'person_other', 'assignment', { person_id: 'person_candidate' }],
+  ['correct on the candidate confirms', 'correct', 'person_candidate', 'confirmation', { person_id: 'person_candidate' }],
+  ['wrong on the candidate detaches', 'wrong', 'person_candidate', 'unlink', { person_id: null }],
+  ['wrong on an unassigned face stays local', 'wrong', null, 'none', null],
+  ['wrong on another owner stays local', 'wrong', 'person_other', 'none', null],
+  ['not a face stays local', 'not_a_face', 'person_candidate', 'none', null],
+  ['unsure stays local', 'unsure', 'person_candidate', 'none', null],
+  ['skip stays local', 'skip', 'person_candidate', 'none', null],
+]) {
+  test(`audit: ${name}`, async () => {
+    const f = auditFixture([faceItem('one')], { owners: { face_one: owner } });
+    await f.begin();
+    await f.decide(outcome);
+    assert.equal(f.state.audit.entries[0].write, write);
+    assert.deepEqual(Array.from(f.writes(), r => r.body), body ? [body] : []);
+    if (body) assert.equal(f.writes()[0].url, 'https://api.example/api/faces/face_one?library_id=lib_test');
+  });
+}
+
+test('audit: a face without a candidate cannot be marked correct or wrong', async () => {
+  const f = auditFixture([faceItem('one', null), faceItem('two', null), faceItem('three', null)], { owners: { face_one: 'person_other' } });
+  await f.begin();
+  assert.deepEqual(Array.from(f.context.auditOutcomes(f.state.audit.queue.items[0]), o => o.outcome), ['not_a_face', 'unsure', 'skip']);
+  await f.decide('correct');
+  await f.decide('wrong');
+  assert.equal(f.state.audit.entries.length, 0);
+  await f.decide('not_a_face');
+  assert.equal(f.state.audit.entries[0].write, 'none');
+  assert.equal(f.writes().length, 0);
+});
+
+test('audit: every cluster outcome is log-only and never reaches a merge route', async () => {
+  const outcomes = ['same_person', 'different', 'mixed', 'unsure', 'skip'];
+  const f = auditFixture(outcomes.map((_, i) => clusterItem(`c${i}`)));
+  await f.begin();
+  for (const outcome of outcomes) await f.decide(outcome);
+  assert.deepEqual(Array.from(f.state.audit.entries, e => [e.outcome, e.write]), outcomes.map(o => [o, 'none']));
+  assert.deepEqual([...new Set(f.requests.map(r => r.method))], ['GET']);
+  assert.ok(f.requests.every(r => new URL(r.url).pathname === '/api/faces'));
+  assert.equal(new URL(f.requests[0].url).searchParams.get('limit'), '12');
+  assert.equal(new URL(f.requests[0].url).searchParams.get('person_id'), 'person_source');
+});
+
+test('audit: repeats are deterministic, about 5%, and spaced after their originals', () => {
+  const { context } = auditFixture([]);
+  const items = Array.from({ length: 200 }, (_, i) => faceItem(`i${i}`));
+  const plan = JSON.stringify(context.auditSchedule('queue_a', items));
+  assert.equal(JSON.stringify(context.auditSchedule('queue_a', items)), plan);
+  assert.notEqual(JSON.stringify(context.auditSchedule('queue_b', items)), plan);
+  for (const size of [19, 20, 21, 40, 73, 119, 200, 500]) {
+    for (const queueId of ['alpha', 'beta', 'gamma']) {
+      const list = Array.from({ length: size }, (_, i) => faceItem(`i${i}`));
+      const schedule = context.auditSchedule(queueId, list);
+      const repeats = schedule.filter(slot => slot.repeat_of);
+      assert.equal(schedule.length - repeats.length, size);
+      assert.equal(repeats.length, size < 20 ? 0 : Math.round(size * 0.05));
+      assert.equal(new Set(repeats.map(slot => slot.repeat_of)).size, repeats.length);
+      schedule.forEach((slot, index) => {
+        if (slot.repeat_of) assert.ok(index - schedule.findIndex(s => s.item.item_id === slot.repeat_of) >= 20);
+      });
+    }
+  }
+});
+
+test('audit: a repeat logs repeat_of, makes no server request, and looks like any other item', async () => {
+  const items = Array.from({ length: 40 }, (_, i) => faceItem(`i${i}`));
+  const f = auditFixture(items);
+  await f.begin();
+  const { schedule } = f.state.audit;
+  for (let i = 0; i < schedule.length - 1; i++) {
+    const slot = f.context.auditCurrent();
+    if (slot.repeat_of) {
+      f.clearRequests();
+      await f.decide('correct');
+      assert.equal(f.requests.length, 0);
+      const entry = f.state.audit.entries.at(-1);
+      assert.equal(entry.repeat_of, slot.item.item_id);
+      assert.equal(entry.item_id, slot.item.item_id);
+      assert.equal(entry.write, 'none');
+      return;
+    }
+    await f.decide('skip');
+  }
+  assert.fail('expected a repeat in a 40-item queue');
+});
+
+test('audit: reviewer-visible text omits distance, stratum, item id, and repeat status', async () => {
+  const f = auditFixture([faceItem('secret_item')]);
+  await f.begin();
+  assert.equal(f.state.audit.queue.items[0].distance, undefined);
+  const visible = [f.elements.get('audit-card-host').innerHTML, f.elements.get('audit-progress').innerHTML].join(' ');
+  assert.doesNotMatch(visible, /0\.41|unassigned|secret_item|repeat|provenance/i);
+});
+
+test('audit: reload resumes the position, log, and Undo state', async () => {
+  const storage = new Map();
+  const items = [faceItem('one'), faceItem('two'), faceItem('three')];
+  const first = auditFixture(items, { storage });
+  await first.begin();
+  await first.decide('correct');
+  await first.decide('skip');
+  assert.equal(storage.get('fcd:audit:active'), 'queue_test');
+  const reloaded = auditFixture(items, { storage });
+  await reloaded.begin(JSON.parse(storage.get('fcd:audit:queue_test')).queue);
+  assert.equal(reloaded.state.audit.entries.length, 2);
+  assert.equal(reloaded.context.auditCurrent().item.item_id, 'three');
+  await reloaded.context.auditUndo();
+  assert.equal(reloaded.context.auditCurrent().item.item_id, 'two');
+  await reloaded.context.auditUndo();
+  await reloaded.context.auditUndo();
+  assert.deepEqual(Array.from(reloaded.writes(), r => r.body), [{ person_id: null }]);
+});
+
+test('audit: a changed queue cannot adopt saved progress for the same queue_id', async () => {
+  const storage = new Map();
+  const first = auditFixture([faceItem('one')], { storage });
+  await first.begin();
+  const changed = auditFixture([faceItem('two')], { storage });
+  assert.throws(() => changed.context.auditBegin(changed.context.auditValidateQueue(queueOf([faceItem('two')]))), /different items/);
+});
+
+test('audit: a queue for an unreadable library is refused', async () => {
+  const f = auditFixture([faceItem('one')]);
+  f.state.libraries = [{ id: 'lib_other' }];
+  await assert.rejects(f.begin(), /cannot read library/);
+});
+
+for (const [name, change, pattern] of [
+  ['schema', q => { q.schema = 'other'; }, /schema/],
+  ['empty items', q => { q.items = []; }, /no items/],
+  ['duplicate item_id', q => { q.items.push({ ...q.items[0] }); }, /duplicate/],
+  ['unknown kind', q => { q.items[0].kind = 'merge'; }, /unknown kind/],
+  ['path traversal in face_id', q => { q.items[0].face_id = '../people/person_a'; }, /face_id/],
+  ['null cluster candidate', q => { q.items[0] = { ...clusterItem('c'), candidate_person_id: null }; }, /candidate_person_id/],
+]) {
+  test(`audit: queue validation rejects ${name}`, () => {
+    const { context } = auditFixture([]);
+    const queue = queueOf([faceItem('one')]);
+    change(queue);
+    assert.throws(() => context.auditValidateQueue(queue), pattern);
+  });
+}
+
+for (const [name, fetchResult] of [
+  ['HTTP failure', init => (init.method === 'PATCH' ? new Response('{"detail":"rejected"}', { status: 500 }) : null)],
+  ['network failure', init => { if (init.method === 'PATCH') throw new Error('offline'); }],
+  ['read failure', () => new Response('{"detail":"missing"}', { status: 404 })],
+  ['mismatched response', init => (init.method === 'PATCH' ? new Response('{"person_id":"person_other"}') : null)],
+]) {
+  test(`audit: ${name} leaves the item undecided and says so`, async () => {
+    const f = auditFixture([faceItem('one'), faceItem('two')], { fetchResult });
+    await f.begin();
+    await f.decide('correct');
+    assert.equal(f.context.auditCurrent().item.item_id, 'one');
+    assert.equal(f.state.audit.entries[0].write, 'failed');
+    assert.ok(f.state.audit.entries[0].error);
+    assert.equal(f.state.audit.notice.error, true);
+    assert.match(f.state.audit.notice.text, /still undecided/);
+    assert.equal(f.elements.get('audit-alert').hidden, false);
+    assert.match(f.messages[0], /still undecided/);
+    assert.equal(f.state.audit.busy, false);
+  });
+}
+
+test('audit: a retry after a failed write decides the item and keeps the failed attempt', async () => {
+  let fail = true;
+  const f = auditFixture([faceItem('one'), faceItem('two')], { fetchResult: init => {
+    if (init.method === 'PATCH' && fail) { fail = false; return new Response('{}', { status: 503 }); }
+    return null;
+  } });
+  await f.begin();
+  await f.decide('correct');
+  await f.decide('correct');
+  assert.deepEqual(Array.from(f.state.audit.entries, e => e.write), ['failed', 'assignment']);
+  assert.equal(f.context.auditCurrent().item.item_id, 'two');
+  assert.equal(f.state.audit.notice, null);
+});
+
+test('audit: a verdict waits for its evidence, while unsure and skip do not', async () => {
+  const f = auditFixture([faceItem('broken'), faceItem('two')], { owners: { face_broken: 'person_candidate' } });
+  await f.begin();
+  await f.decide('correct');
+  await f.decide('wrong');
+  await f.decide('not_a_face');
+  assert.equal(f.state.audit.entries.length, 0);
+  assert.equal(f.writes().length, 0);
+  assert.equal(f.elements.get('audit-face').textContent, 'load failed');
+  await f.decide('skip');
+  assert.equal(f.state.audit.entries[0].outcome, 'skip');
+});
+
+test('audit: a pending write blocks a second decision', async () => {
+  let release;
+  const gate = new Promise(resolve => { release = resolve; });
+  const f = auditFixture([faceItem('one'), faceItem('two')], { fetchResult: init => (init.method === 'PATCH' ? gate : null) });
+  await f.begin();
+  await f.settle();
+  const pending = f.context.auditDecide('correct');
+  await f.context.auditDecide('skip');
+  await f.context.auditUndo();
+  assert.equal(f.state.audit.entries.length, 0);
+  release(new Response('{"person_id":"person_candidate"}'));
+  await pending;
+  assert.equal(f.state.audit.entries.length, 1);
+});
+
+test('audit: Undo of a log-only decision reopens the item without a request', async () => {
+  const f = auditFixture([faceItem('one')], { owners: { face_one: 'person_candidate' } });
+  await f.begin();
+  await f.decide('skip');
+  f.clearRequests();
+  await f.context.auditUndo();
+  assert.equal(f.state.audit.entries.length, 0);
+  assert.equal(f.requests.length, 0);
+  assert.equal(f.context.auditCurrent().item.item_id, 'one');
+});
+
+for (const [name, owner, outcome, restored, notice] of [
+  ['assignment from unassigned', null, 'correct', null, /new ordinary edit.*clears the assignment.*rejection/],
+  ['assignment from another person', 'person_other', 'correct', 'person_other', /new ordinary edit.*previous person/],
+  ['unlink', 'person_candidate', 'wrong', 'person_candidate', /new ordinary edit.*candidate person/],
+]) {
+  test(`audit: Undo of ${name} warns, then writes the previous person as a fresh edit`, async () => {
+    const f = auditFixture([faceItem('one')], { owners: { face_one: owner } });
+    await f.begin();
+    await f.decide(outcome);
+    const before = f.writes().length;
+    await f.context.auditUndo();
+    assert.equal(f.writes().length, before);
+    assert.equal(f.state.audit.entries.length, 1);
+    assert.match(f.state.audit.notice.text, notice);
+    assert.match(f.state.audit.notice.text, /does not reverse server history/);
+    await f.context.auditUndo();
+    assert.deepEqual(f.writes().at(-1).body, { person_id: restored });
+    assert.equal(f.state.audit.entries.length, 0);
+  });
+}
+
+test('audit: Undo of a confirmation warns and writes nothing', async () => {
+  const f = auditFixture([faceItem('one')], { owners: { face_one: 'person_candidate' } });
+  await f.begin();
+  await f.decide('correct');
+  await f.context.auditUndo();
+  assert.match(f.state.audit.notice.text, /confirmation stays saved/);
+  await f.context.auditUndo();
+  assert.equal(f.writes().length, 1);
+  assert.equal(f.state.audit.entries.length, 0);
+});
+
+test('audit: a failed Undo keeps the decision and says so', async () => {
+  let failing = false;
+  const f = auditFixture([faceItem('one')], { fetchResult: init => (failing && init.method === 'PATCH' ? new Response('{}', { status: 500 }) : null) });
+  await f.begin();
+  await f.decide('correct');
+  failing = true;
+  await f.context.auditUndo();
+  await f.context.auditUndo();
+  assert.equal(f.state.audit.entries.length, 1);
+  assert.equal(f.state.audit.entries[0].write, 'assignment');
+  assert.match(f.state.audit.notice.text, /Undo failed/);
+});
+
+test('audit: an unsaved log warns the reviewer to export', async () => {
+  const f = auditFixture([faceItem('one'), faceItem('two')], { failSave: true });
+  await f.begin();
+  await f.decide('skip');
+  assert.match(f.state.audit.notice.text, /Export the log/);
+});
+
+test('audit: the export has the exact log shape and only identifiers', async () => {
+  const items = [faceItem('one'), clusterItem('two')];
+  const f = auditFixture(items, { fetchResult: init => (init.method === 'PATCH' ? new Response('{}', { status: 500 }) : null) });
+  await f.begin();
+  await f.decide('correct');
+  await f.decide('skip');
+  await f.decide('mixed');
+  const log = f.log();
+  assert.deepEqual(Object.keys(log), ['schema', 'queue_id', 'exported_at', 'entries']);
+  assert.equal(log.schema, 'face-review-log/1');
+  assert.equal(log.queue_id, 'queue_test');
+  assert.equal(log.exported_at, '2026-01-02T03:04:05.000Z');
+  assert.deepEqual(Array.from(log.entries, e => [e.item_id, e.stratum, e.kind, e.outcome, e.repeat_of, e.write]), [
+    ['one', 'unassigned', 'face', 'correct', null, 'failed'],
+    ['one', 'unassigned', 'face', 'skip', null, 'none'],
+    ['two', 'unnamed', 'cluster', 'mixed', null, 'none'],
+  ]);
+  for (const entry of log.entries) {
+    assert.deepEqual(Object.keys(entry), ['item_id', 'stratum', 'kind', 'outcome', 'repeat_of', 'decided_at', 'write', 'error']);
+    assert.match(entry.decided_at, /^\d{4}-\d{2}-\d{2}T/);
+  }
+  assert.match(log.entries[0].error, /500/);
+  assert.equal(log.entries[1].error, null);
+  f.context.auditExport();
+  assert.equal(f.downloads[0].name, 'face-review-log-queue_test.json');
+  assert.equal(JSON.parse(f.downloads[0].blob.text).schema, 'face-review-log/1');
+  assert.equal(f.state.audit.entries.length, 3);
+  assert.doesNotMatch(f.downloads[0].blob.text, /Candidate|undo_person_id/);
+});
+
+test('audit: keyboard ignores modified and held keys and maps kinds separately', async () => {
+  const f = auditFixture([faceItem('one'), clusterItem('two')]);
+  await f.begin();
+  await f.settle();
+  const key = (k, extra = {}) => f.context.auditKeydown({ key: k, preventDefault() {}, ...extra });
+  key('a', { metaKey: true });
+  key('a', { repeat: true });
+  key('m');
+  await f.settle();
+  assert.equal(f.state.audit.entries.length, 0);
+  key('N');
+  await f.settle();
+  assert.equal(f.state.audit.entries[0].outcome, 'not_a_face');
+  await f.settle();
+  key('m');
+  await f.settle();
+  assert.equal(f.state.audit.entries[1].outcome, 'mixed');
+});

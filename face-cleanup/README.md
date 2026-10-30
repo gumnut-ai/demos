@@ -16,6 +16,8 @@ dependencies beyond a browser and a way to serve a directory locally.
 > immediate. Accept records the existing assignment as manually confirmed.
 > Undo (`Z`) reopens local review or makes another ordinary assignment.
 > It cannot reverse server history or restore automatic assignment provenance.
+>
+> Audit mode's `correct` and `wrong` verdicts make the same real edits.
 
 ## Quick start
 
@@ -121,6 +123,114 @@ After a batch of reassignments the centroid shifts; click **Pick
 another person ↗** in the header and re-pick the same subject to
 rebuild against the new centroid.
 
+## Audit a prepared queue
+
+Audit mode measures a review. Server history records actions, so a skip or a
+rejected suggestion on an unassigned face leaves no trace. This mode reviews a
+prepared queue and exports a log of every decision. Click **Audit a queue ↗**
+in the header, then choose a local JSON file. The file is read in the browser
+and never uploaded. Queue and log files can identify your library, so keep them
+private.
+
+```json
+{
+  "schema": "face-review-queue/1",
+  "queue_id": "example-queue",
+  "library_id": "lib_example",
+  "items": [
+    {
+      "item_id": "item-1",
+      "stratum": "example",
+      "kind": "face",
+      "face_id": "face_example",
+      "candidate_person_id": "person_example",
+      "distance": 0.41
+    },
+    {
+      "item_id": "item-2",
+      "stratum": "example",
+      "kind": "cluster",
+      "source_person_id": "person_source",
+      "candidate_person_id": "person_example",
+      "distance": 0.31
+    }
+  ]
+}
+```
+
+![Audit view, using a synthetic fixture: a face crop beside the candidate person, with outcome keys.](screenshots/audit_view.png)
+
+To avoid anchoring, the reviewer sees the images and the candidate's name, but
+not the distance, stratum, assignment provenance, or current owner.
+
+| Key | Face outcome | Server write |
+| --- | --- | --- |
+| `A` | `correct` | `PATCH` to the candidate. Logged as `confirmation` if the face is already on the candidate, otherwise `assignment`. |
+| `D` | `wrong` | `PATCH` to null, logged as `unlink`, if the face is on the candidate. Otherwise none. |
+| `N` | `not_a_face` | None. |
+| `U` | `unsure` | None. |
+| `S` | `skip` | None. |
+
+| Key | Cluster outcome | Server write |
+| --- | --- | --- |
+| `A` | `same_person` | None. |
+| `D` | `different` | None. |
+| `M` | `mixed` | None. |
+| `U` | `unsure` | None. |
+| `S` | `skip` | None. |
+
+The grid shows the first 12 faces the API lists for the source person. Cluster
+outcomes never merge people, because merges are permanent.
+
+`P` shows the photo around a face, `Z` undoes the latest decision, and `E`
+exports the log. The current owner is read just before a verdict is applied.
+`wrong` leaves a face on a third person alone. A face item with a null candidate
+offers only `N`, `U`, and `S`. Verdict keys wait until the evidence has loaded.
+
+**Repeats.** About 5% of items reappear at least 20 positions later, chosen
+deterministically from `queue_id` and not labeled. Their entries set `repeat_of`
+to the original `item_id` and never write to the server. A queue of fewer than
+20 items has no repeats.
+
+**Failures.** A failed read or write leaves the item undecided, shows an error,
+and logs an entry with `write: "failed"`. A retry appends another entry, so use
+the latest entry for each item. The failed request may have saved, so a retry
+can log `confirmation` for an `assignment`, or `none` for an `unlink`.
+
+**Undo.** Log-only decisions just reopen. For a decision that wrote, the first
+`Z` explains the effect and the second `Z` makes it. Undoing an `assignment` or
+`unlink` saves a fresh edit of the previous person; undoing a `confirmation`
+writes nothing. Neither reverses server history, and removing the log entry
+means that history can hold edits the log does not.
+
+**Progress.** The queue and log persist in `localStorage` under
+`fcd:audit:{queue_id}`, so reload resumes. Choosing the same queue later also
+resumes it. A file with the same `queue_id` and different items is refused.
+
+The exported file is one JSON object, with one entry per decision or failed
+attempt. Entries contain identifiers only, and `error` is null unless a write
+failed:
+
+```json
+{
+  "schema": "face-review-log/1",
+  "queue_id": "example-queue",
+  "exported_at": "2026-01-01T00:00:00.000Z",
+  "entries": [
+    {
+      "item_id": "item-1",
+      "stratum": "example",
+      "kind": "face",
+      "outcome": "correct",
+      "repeat_of": null,
+      "decided_at": "2026-01-01T00:00:00.000Z",
+      "write": "assignment",
+      "error": null
+    }
+  ]
+}
+```
+
 ## What it calls
 
 The dashboard is a pure consumer of the public API. For a chosen
@@ -151,6 +261,8 @@ subject Person it calls:
   the current person link. Deploy the backend exposing `assignment_source`
   before relying on the demo to hide manual assignments; older responses can
   still hide manual boxes but cannot identify manual assignments.
+- `GET /api/faces?person_id=…&library_id=…&limit=12` — source faces for an
+  audit cluster item.
 - `PATCH /api/faces/{id}` — reassignments, detaches, and confirmations
   (Accept sends the current person ID). Requires an API version that records
   same-person assignments as manual confirmations; older versions return
