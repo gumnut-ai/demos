@@ -163,6 +163,9 @@ private.
 To avoid anchoring, the reviewer sees the images and the candidate's name, but
 not the distance, stratum, assignment provenance, or current owner.
 
+Click any thumbnail to see that face in its full photo. The next two items load
+ahead, so each decision shows the following item without a wait.
+
 | Key | Face outcome | Server write |
 | --- | --- | --- |
 | `A` | `correct` | `PATCH` to the candidate. Logged as `confirmation` if the face is already on the candidate, otherwise `assignment`. |
