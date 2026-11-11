@@ -22,16 +22,21 @@ Open <http://127.0.0.1:5173>.
 
 ## How it works
 
-A small [Hono](https://hono.dev) server (`src/server.ts`) serves the static
-page in `public/` and exposes two proxy endpoints so the API key never
-leaves the server:
+A small [Hono](https://hono.dev) server (`src/server.ts`, with routes in
+`src/app.ts`) serves the static page in `public/` and exposes two proxy
+endpoints so the API key never leaves the server:
 
 - `GET /api/assets` — forwards to `${GUMNUT_BASE_URL}/api/assets` with the
-  bearer token, supporting an optional `starting_after_id` cursor.
+  bearer token, supporting an optional `starting_after_id` cursor. This is
+  the only request that carries the API key.
 - `GET /api/thumbnail?u=<url>` — fetches a thumbnail URL from the asset
   payload. Only `gumnut.ai` (and the configured upstream origin) are
-  allowed; the API key is forwarded only to the upstream origin since
-  `assets.gumnut.ai` URLs are presigned.
+  allowed. Thumbnail URLs are presigned (or, against a local Gumnut API
+  server, served without auth), so they are fetched without the API key.
+
+The server listens on `127.0.0.1` only and answers requests addressed to
+`127.0.0.1:5173` or `localhost:5173`; requests with any other `Host` are
+refused.
 
 ## Configuration
 
@@ -39,3 +44,13 @@ leaves the server:
 |---|---|
 | `GUMNUT_BASE_URL` | Gumnut API base URL (e.g. `https://api.gumnut.ai` or `http://localhost:8000`). |
 | `GUMNUT_API_KEY` | Bearer token for the Gumnut API. |
+
+## Tests
+
+```sh
+npm run typecheck
+npm test
+```
+
+The tests start the server on a random local port with a stubbed upstream,
+so they need no API key or network access.

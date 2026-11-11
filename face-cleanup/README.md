@@ -46,8 +46,11 @@ In the page:
 
 ![Person picker — every person in the library (named and unnamed), as a thumbnail grid sorted by face count.](screenshots/person_selector_view.png)
 
-The credentials, library ID, and active subject persist in
-`localStorage`, so reload returns you to the same view.
+The API key is kept in `sessionStorage` for this tab's browsing session,
+so reloading the tab keeps you connected. Click **Forget API key** in the
+header to clear it.
+The API base URL, library ID, and active subject persist in
+`localStorage`, so after re-entering the key you return to the same view.
 
 ## How to triage
 
@@ -193,9 +196,13 @@ them. `OUTLIER_DISTANCE` is dashboard-only.
 
 The page sends your API key on every request. **Don't host this on a
 shared origin without an auth front-door** — just run it locally and
-access via `localhost`. The API key only lives in your browser's
-`localStorage`, and the API only ever returns data scoped to the
-libraries you own.
+access via `localhost`. The API key only lives in this tab's
+`sessionStorage`. Browsers may restore it if you reopen a closed tab or
+restore a previous browsing session, so click **Forget API key** when
+you are done, especially on a shared computer. A key saved in
+`localStorage` by an earlier version of this page is moved into the
+tab's session, and the stored copy is deleted, the next time the page
+loads. The API only ever returns data scoped to the libraries you own.
 
 ## Layout
 

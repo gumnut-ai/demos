@@ -233,6 +233,7 @@
   <h1>Face cleanup</h1>
   <span class="subject" id="subject-label">Loading…</span>
   <a href="#" class="change-subject" id="change-subject" hidden>Pick another person ↗</a>
+  <a href="#" class="change-subject" id="forget-key" hidden>Forget API key</a>
   <div class="filter-tabs" id="filter-tabs"></div>
 </header>
 
@@ -331,7 +332,9 @@ const OUTLIER_DISTANCE  = 0.45;  // dashboard-only — flags worst-outlier tab
 
 // ---------- config / persistence ----------
 const LS_KEY_API_BASE   = 'fcd:api_base';
-const LS_KEY_API_KEY    = 'fcd:api_key';
+// Used in sessionStorage, and in localStorage only to migrate or clear a
+// key saved by earlier versions; keep the value so that still works.
+const API_KEY_STORAGE_KEY = 'fcd:api_key';
 const LS_KEY_LIBRARY_ID = 'fcd:library_id';
 const LS_KEY_PERSON_ID  = 'fcd:person_id';
 const LS_KEY_FILTER     = 'fcd:filter';
@@ -346,6 +349,26 @@ function loadReviewed(personId) {
 }
 function saveReviewed(personId, map) {
   localStorage.setItem(reviewedKey(personId), JSON.stringify(map));
+}
+
+// The API key is kept in sessionStorage, scoped to this tab's browsing
+// session and never written to localStorage. Earlier versions kept it in
+// localStorage, so a key found there moves into this tab's session and the
+// localStorage copy is deleted.
+function loadApiKey() {
+  const legacy = localStorage.getItem(API_KEY_STORAGE_KEY);
+  if (legacy !== null) {
+    localStorage.removeItem(API_KEY_STORAGE_KEY);
+    if (!sessionStorage.getItem(API_KEY_STORAGE_KEY)) sessionStorage.setItem(API_KEY_STORAGE_KEY, legacy);
+  }
+  return sessionStorage.getItem(API_KEY_STORAGE_KEY);
+}
+function saveApiKey(key) {
+  sessionStorage.setItem(API_KEY_STORAGE_KEY, key);
+}
+function forgetApiKey() {
+  sessionStorage.removeItem(API_KEY_STORAGE_KEY);
+  localStorage.removeItem(API_KEY_STORAGE_KEY);
 }
 
 // ---------- toast ----------
@@ -1073,6 +1096,7 @@ function ensurePerson(personId) {
 // ---------- rendering ----------
 const subjectLabel = document.getElementById('subject-label');
 const changeSubjectLink = document.getElementById('change-subject');
+const forgetKeyLink = document.getElementById('forget-key');
 const tabs = document.getElementById('filter-tabs');
 const content = document.getElementById('content');
 const credsPanel = document.getElementById('creds-panel');
@@ -1319,7 +1343,7 @@ async function render() {
     acceptBtnEl.title = acceptTitle;
   }
   const reviewedTag = state.reviewed[face.face_id]
-    ? `<span class="badge good">${state.reviewed[face.face_id]}</span>` : '';
+    ? `<span class="badge good">${escapeHtml(state.reviewed[face.face_id])}</span>` : '';
 
   // The meta line and candidates-section header are mode-aware. For
   // normal-tab faces we identify the subject and show alternate
@@ -1363,7 +1387,7 @@ async function render() {
         ${provenanceLabels(face)}
         ${badgeFor(face)}
         ${metaCore}
-        <span> · face <code>${face.face_id}</code></span>
+        <span> · face <code>${escapeHtml(face.face_id)}</code></span>
         <span> · <a id="asset-link" target="_blank" rel="noopener">open asset ↗</a></span>
       </div>
       <div class="thumb-row">
@@ -1393,7 +1417,7 @@ async function render() {
     const url = f && f.asset_urls && f.asset_urls.thumbnail && f.asset_urls.thumbnail.url;
     if (url) {
       wrap.classList.remove('empty');
-      wrap.innerHTML = `<img src="${url}" alt="face crop" />`;
+      wrap.innerHTML = `<img src="${escapeHtml(url)}" alt="face crop" />`;
     } else {
       wrap.textContent = 'no thumbnail';
     }
@@ -1412,7 +1436,7 @@ async function render() {
     const link = document.getElementById('asset-link');
     if (link) {
       const u = pickAssetViewUrl(a);
-      if (u) {
+      if (u && /^https?:/i.test(u)) {
         link.href = u;
       } else {
         link.removeAttribute('href');
@@ -1437,7 +1461,7 @@ async function render() {
       const overlayHtml = overlayStyle
         ? `<div class="asset-bbox-overlay" style="${overlayStyle}"></div>`
         : '';
-      wrap.innerHTML = `<img src="${url}" alt="parent asset" />${overlayHtml}`;
+      wrap.innerHTML = `<img src="${escapeHtml(url)}" alt="parent asset" />${overlayHtml}`;
       wrap.onclick = () => openLightbox(a, face.bbox);
     }
   }).catch(e => {
@@ -1466,7 +1490,7 @@ async function render() {
       const personObj = state.personCache.get(c.id);
       const thumbUrl = personObj && personObj.asset_urls && personObj.asset_urls.thumbnail && personObj.asset_urls.thumbnail.url;
       btn.innerHTML = `
-        <div class="candidate-thumb">${thumbUrl ? `<img src="${thumbUrl}" alt="" />` : '?'}</div>
+        <div class="candidate-thumb">${thumbUrl ? `<img src="${escapeHtml(thumbUrl)}" alt="" />` : '?'}</div>
         <div class="candidate-meta">
           <div class="candidate-name">${escapeHtml(c.name ?? UNNAMED_LABEL)}</div>
           <div class="candidate-dist">d=${c.d.toFixed(3)} ${inGate ? '✓ in gate' : '· out of gate'}${cohesionWarn}</div>
@@ -1487,7 +1511,7 @@ async function render() {
           if (!url) return;
           const thumb = btn.querySelector('.candidate-thumb');
           if (thumb && btn.dataset.personId === c.id) {
-            thumb.innerHTML = `<img src="${url}" alt="" />`;
+            thumb.innerHTML = `<img src="${escapeHtml(url)}" alt="" />`;
           }
         }).catch(e => console.warn('Candidate thumb load failed', c.id, e));
       }
@@ -1529,7 +1553,7 @@ function openLightbox(asset, bbox) {
   lightboxEl.innerHTML = `
     <button class="lightbox-close" type="button" aria-label="Close">Close (Esc)</button>
     <div class="lightbox-frame">
-      <img src="${url}" alt="parent asset" />
+      <img src="${escapeHtml(url)}" alt="parent asset" />
       ${overlayHtml}
     </div>
   `;
@@ -1814,8 +1838,9 @@ window.addEventListener('keydown', (e) => {
 async function init() {
   state.filter = localStorage.getItem(LS_KEY_FILTER) || 'closer';
   document.getElementById('api-base').value = localStorage.getItem(LS_KEY_API_BASE) || 'https://api.gumnut.ai';
-  document.getElementById('api-key').value  = localStorage.getItem(LS_KEY_API_KEY)  || '';
+  document.getElementById('api-key').value  = loadApiKey() || '';
   document.getElementById('save-creds').onclick = onSaveCreds;
+  forgetKeyLink.onclick = onForgetKey;
   document.getElementById('library-continue').onclick = onLibraryContinue;
   document.getElementById('person-filter').oninput = renderPersonList;
   document.getElementById('include-manual').onchange = e => setIncludeManual(e.target.checked);
@@ -1847,14 +1872,16 @@ async function init() {
 async function runStage() {
   hideAllPanels();
   changeSubjectLink.hidden = true;
+  forgetKeyLink.hidden = true;
 
   // Stage A — credentials
   const base = localStorage.getItem(LS_KEY_API_BASE);
-  const key  = localStorage.getItem(LS_KEY_API_KEY);
+  const key  = loadApiKey();
   if (!base || !key) {
     credsPanel.hidden = false;
     return;
   }
+  forgetKeyLink.hidden = false;
   state.client = new Client(base, key);
 
   // Stage B — library picker. Cached library list short-circuits the
@@ -1916,11 +1943,23 @@ async function onSaveCreds() {
   const key  = document.getElementById('api-key').value.trim();
   if (!base || !key) { toast('Please fill in API base and key', 'error'); return; }
   localStorage.setItem(LS_KEY_API_BASE, base);
-  localStorage.setItem(LS_KEY_API_KEY, key);
+  saveApiKey(key);
   // Forget any cached library list so the next runStage refetches with
   // the new credentials.
   state.libraries = [];
   await runStage();
+}
+
+// Clears the saved key, then reloads so no in-memory client or background
+// list load keeps using it. The library, person, and review progress stay.
+function onForgetKey(e) {
+  e.preventDefault();
+  if (state.actionInFlight) {
+    toast('Wait for the pending change to finish, then forget the key.', 'error');
+    return;
+  }
+  forgetApiKey();
+  location.reload();
 }
 
 function renderLibraryPicker() {
@@ -2010,10 +2049,10 @@ function renderPersonList() {
       : escapeHtml(UNNAMED_LABEL);
     card.innerHTML = `
       <div class="person-card-thumb">${thumbUrl
-        ? `<img src="${thumbUrl}" alt="" loading="lazy" />`
+        ? `<img src="${escapeHtml(thumbUrl)}" alt="" loading="lazy" />`
         : (p.name ? '👤' : '?')}</div>
       <div class="name">${nameHtml}${idSuffix}</div>
-      <div class="meta">${fcStr}${p90Str}</div>
+      <div class="meta">${escapeHtml(fcStr)}${p90Str}</div>
     `;
     card.onclick = () => onPickPerson(p.id);
     host.appendChild(card);

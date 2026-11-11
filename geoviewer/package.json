@@ -5,7 +5,9 @@
   "type": "module",
   "scripts": {
     "dev": "tsx --env-file=.env --watch src/server.ts",
-    "start": "tsx --env-file=.env src/server.ts"
+    "start": "tsx --env-file=.env src/server.ts",
+    "test": "tsx --test src/app.test.ts",
+    "typecheck": "tsc -p ."
   },
   "dependencies": {
     "@hono/node-server": "^1.13.7",

@@ -12,7 +12,10 @@ const filter = html.slice(html.indexOf('async function setFilter('), html.indexO
 const loaders = html.slice(html.indexOf('async function ensureInverseFaces()'), html.indexOf('async function setFilter('));
 const controls = html.slice(html.indexOf('  const ownerId = currentPersonId('), html.indexOf('  const reviewedTag ='));
 const launch = html.slice(html.indexOf('async function launchCleanup()'), html.indexOf('init().catch('));
-const renderer = html.slice(html.indexOf('async function render()'), html.indexOf('function escapeHtml(')).replace('async function render()', 'async function renderEmpty()');
+const renderSource = html.slice(html.indexOf('async function render()'), html.indexOf('function escapeHtml('));
+const renderer = renderSource.replace('async function render()', 'async function renderEmpty()');
+const escaper = html.slice(html.indexOf('function escapeHtml('), html.indexOf('// Compute the inline style for the bbox overlay'));
+const selectors = html.slice(html.indexOf('function pickAssetViewUrl('), html.indexOf('// Warm the per-Person thumbnail cache up-front'));
 
 function fixture({ owner = 'person_subject', mode, lastAssigned, fetchResult, lazyFaces } = {}) {
   const face = { face_id: 'face_test', initial_person_id: owner, mode, candidates: [{ id: 'person_new', name: 'Morgan' }] };
@@ -397,7 +400,7 @@ test('Accept refreshes provenance tab counts without removing recent edits from 
 // Model the API's lean default so losing include=variants reproduces the
 // thumbnail-only lightbox, including when neighbor prefetch fills the cache.
 const assetHelpers = html.slice(html.indexOf('// ---------- prefetch helpers ----------'), html.indexOf('// Warm the per-Person thumbnail cache up-front'));
-const lightbox = html.slice(html.indexOf('function bboxOverlayStyle('), html.indexOf('// ---------- actions ----------'));
+const lightbox = html.slice(html.indexOf('function escapeHtml('), html.indexOf('// ---------- actions ----------'));
 
 for (const video of [false, true]) {
 for (const prefetched of [false, true]) {
@@ -453,7 +456,6 @@ for (const prefetched of [false, true]) {
 
 test('image selectors never use a video original when a larger still is missing', () => {
   const context = createContext({});
-  const selectors = html.slice(html.indexOf('function pickAssetViewUrl('), html.indexOf('// Warm the per-Person thumbnail cache up-front'));
   runInContext(selectors, context);
   const asset = { asset_urls: { original: { url: 'video.mp4', mimetype: 'video/mp4' }, thumbnail_image: { url: 'still.jpg', mimetype: 'image/jpeg' } } };
   assert.equal(context.pickAssetViewUrl(asset), 'still.jpg');
@@ -462,4 +464,162 @@ test('image selectors never use a video original when a larger still is missing'
   assert.equal(context.pickAssetViewUrl(asset), null);
   assert.equal(context.pickAssetThumbUrl(asset), null);
   assert.equal(context.pickAssetViewUrl({ asset_urls: { original: { url: 'photo.jpg', mimetype: 'image/jpeg' } } }), 'photo.jpg');
+});
+
+// ---------- API key storage ----------
+const keyStorage = html.slice(html.indexOf('// ---------- config / persistence ----------'), html.indexOf('// ---------- toast ----------'));
+const credentialFlow = html.slice(html.indexOf('async function runStage()'), html.indexOf('function renderLibraryPicker()'));
+
+class FakeStorage {
+  constructor(entries = {}) { this.map = new Map(Object.entries(entries)); this.writes = []; }
+  getItem(key) { return this.map.has(key) ? this.map.get(key) : null; }
+  setItem(key, value) { this.writes.push(key); this.map.set(key, String(value)); }
+  removeItem(key) { this.map.delete(key); }
+}
+
+function credentialFixture({ local = {}, session = {}, inputs = {} } = {}) {
+  const localStorage = new FakeStorage(local);
+  const sessionStorage = new FakeStorage(session);
+  const clients = [];
+  const messages = [];
+  let reloads = 0;
+  const elements = Object.fromEntries(['api-base', 'api-key', 'creds-hint'].map(id => [id, { value: inputs[id] ?? '', textContent: '' }]));
+  const state = { libraries: [], actionInFlight: false };
+  const context = createContext({
+    state, localStorage, sessionStorage,
+    document: { getElementById: id => elements[id] },
+    credsPanel: { hidden: true }, changeSubjectLink: { hidden: true }, forgetKeyLink: { hidden: true },
+    hideAllPanels() {}, toast: message => messages.push(message),
+    location: { reload: () => { reloads += 1; } },
+    Client: class { constructor(base, key) { clients.push({ base, key }); } async listLibraries() { return []; } },
+  });
+  runInContext(`${keyStorage}\n${credentialFlow}`, context);
+  return { context, localStorage, sessionStorage, clients, messages, elements, state, reloads: () => reloads };
+}
+
+test('a saved API key lives in session storage, never local storage', async () => {
+  const f = credentialFixture({ inputs: { 'api-base': 'https://api.example', 'api-key': 'key_test' } });
+  await f.context.onSaveCreds();
+  assert.equal(f.sessionStorage.getItem('fcd:api_key'), 'key_test');
+  assert.deepEqual(f.localStorage.writes, ['fcd:api_base']);
+  assert.deepEqual(f.clients, [{ base: 'https://api.example', key: 'key_test' }]);
+  assert.equal(f.context.forgetKeyLink.hidden, false);
+});
+
+test('a key left in local storage by an earlier version moves into the session', async () => {
+  const f = credentialFixture({ local: { 'fcd:api_base': 'https://api.example', 'fcd:api_key': 'key_old' } });
+  await f.context.runStage();
+  assert.equal(f.localStorage.getItem('fcd:api_key'), null);
+  assert.equal(f.sessionStorage.getItem('fcd:api_key'), 'key_old');
+  assert.deepEqual(f.clients, [{ base: 'https://api.example', key: 'key_old' }]);
+});
+
+test('without a session key the Connect panel shows and Forget API key hides', async () => {
+  const f = credentialFixture({ local: { 'fcd:api_base': 'https://api.example' } });
+  f.context.forgetKeyLink.hidden = false;
+  await f.context.runStage();
+  assert.equal(f.context.credsPanel.hidden, false);
+  assert.equal(f.context.forgetKeyLink.hidden, true);
+  assert.deepEqual(f.clients, []);
+});
+
+test('Forget API key clears the key from both storages and reloads', () => {
+  const f = credentialFixture({ local: { 'fcd:api_key': 'key_old', 'fcd:library_id': 'lib_test' }, session: { 'fcd:api_key': 'key_test' } });
+  f.context.onForgetKey({ preventDefault() {} });
+  assert.equal(f.sessionStorage.getItem('fcd:api_key'), null);
+  assert.equal(f.localStorage.getItem('fcd:api_key'), null);
+  assert.equal(f.localStorage.getItem('fcd:library_id'), 'lib_test');
+  assert.equal(f.reloads(), 1);
+});
+
+test('Forget API key waits for a pending change', () => {
+  const f = credentialFixture({ session: { 'fcd:api_key': 'key_test' } });
+  f.state.actionInFlight = true;
+  f.context.onForgetKey({ preventDefault() {} });
+  assert.equal(f.sessionStorage.getItem('fcd:api_key'), 'key_test');
+  assert.equal(f.reloads(), 0);
+  assert.equal(f.messages.length, 1);
+});
+
+// ---------- HTML escaping of API values ----------
+const hostileUrl = 'https://cdn.example/x.jpg" data-injected="1';
+
+test('person picker cards escape API-returned URLs and counts', () => {
+  const personList = html.slice(html.indexOf('function renderPersonList()'), html.indexOf('function onPickPerson('));
+  const cards = [];
+  const context = createContext({
+    state: { peoplePicker: [{ id: 'person_test', name: null, cluster_metrics: { face_count: '<b>3</b>' }, asset_urls: { thumbnail: { url: hostileUrl } } }] },
+    UNNAMED_LABEL: '(unnamed)', onPickPerson() {},
+    document: {
+      getElementById: id => (id === 'person-filter' ? { value: '' } : { innerHTML: '', appendChild: card => cards.push(card) }),
+      createElement: () => ({}),
+    },
+  });
+  runInContext(`${personList}\n${escaper}`, context);
+  context.renderPersonList();
+  assert.equal(cards.length, 1);
+  assert.match(cards[0].innerHTML, /src="https:\/\/cdn.example\/x.jpg&quot; data-injected=&quot;1"/);
+  assert.match(cards[0].innerHTML, /&lt;b&gt;3&lt;\/b&gt; faces/);
+  assert.doesNotMatch(cards[0].innerHTML, /<b>/);
+});
+
+test('the lightbox escapes an API-returned image URL', () => {
+  const mounted = [];
+  const context = createContext({
+    toast: () => assert.fail('a URL is available'),
+    document: { createElement: () => ({ innerHTML: '', addEventListener() {} }), body: { appendChild: element => mounted.push(element) } },
+  });
+  runInContext(`${selectors}\n${lightbox}`, context);
+  context.openLightbox({ asset_urls: { preview: { url: hostileUrl } } }, null);
+  assert.match(mounted[0].innerHTML, /src="https:\/\/cdn.example\/x.jpg&quot; data-injected=&quot;1"/);
+});
+
+async function renderFaceCard(viewUrl) {
+  const elements = new Map();
+  const element = id => {
+    if (!elements.has(id)) elements.set(id, { id, innerHTML: '', textContent: '', classList: { add() {}, remove() {} }, removeAttribute(name) { delete this[name]; }, appendChild() {} });
+    return elements.get(id);
+  };
+  const buttons = [];
+  const face = { face_id: 'face_<i>1</i>', asset_id: 'asset_test', mode: 'subject', d_current: 0.4, candidates: [{ id: 'person_new', name: 'Morgan', d: 0.3 }, { id: 'person_lazy', name: 'Casey', d: 0.32 }] };
+  const state = {
+    faces: [face], index: 0, reviewed: {},
+    snapshot: { subject: { id: 'person_subject', name: 'Riley' }, people: [] },
+    personCache: new Map([['person_new', { asset_urls: { thumbnail: { url: hostileUrl } } }]]),
+  };
+  const context = createContext({
+    state, UNNAMED_LABEL: '(unnamed)', CANDIDATE_WINDOW: 0.6, DISTANCE_GATE: 0.35, COHESION_GATE: 0.65,
+    closeLightbox() {}, refreshActionControls() {}, renderReviewScope() {}, renderProgress() {},
+    currentPersonId: () => 'person_subject', currentPersonName: () => 'Riley',
+    provenanceLabels: () => '', badgeFor: () => '', reviewBusy: () => false, assignTo() {}, openLightbox() {},
+    bboxOverlayStyle: () => '', ensurePerson: async () => ({ asset_urls: { thumbnail: { url: hostileUrl } } }),
+    ensureFace: async () => ({ asset_urls: { thumbnail: { url: hostileUrl } } }),
+    ensureAsset: async () => ({ asset_urls: { thumbnail: { url: hostileUrl }, preview: { url: viewUrl } } }),
+    faceHost: element('face-host'), progress: element('progress'),
+    document: { getElementById: element, createElement: () => { const b = { dataset: {}, thumb: { innerHTML: '' } }; b.querySelector = () => b.thumb; buttons.push(b); return b; } },
+    console,
+  });
+  runInContext(`${renderSource}\n${escaper}\n${selectors}`, context);
+  element('asset-link').href = 'about:blank';
+  await context.render();
+  await new Promise(resolve => setTimeout(resolve, 0));
+  return { faceHost: context.faceHost, element, buttons };
+}
+
+test('the face card escapes API-returned values and links only to http(s) assets', async () => {
+  const { faceHost, element, buttons } = await renderFaceCard('javascript:alert(1)');
+  const escaped = /src="https:\/\/cdn.example\/x.jpg&quot; data-injected=&quot;1"/;
+  assert.match(faceHost.innerHTML, /<code>face_&lt;i&gt;1&lt;\/i&gt;<\/code>/);
+  assert.match(element('face-img-wrap').innerHTML, escaped);
+  assert.match(element('asset-img-wrap').innerHTML, escaped);
+  assert.equal(buttons.length, 2);
+  assert.match(buttons[0].innerHTML, escaped);
+  assert.match(buttons[1].thumb.innerHTML, escaped);
+  assert.equal(element('asset-link').href, undefined);
+  assert.equal(element('asset-link').textContent, 'asset url unavailable');
+});
+
+test('the face card links an http(s) asset view URL', async () => {
+  const { element } = await renderFaceCard('https://cdn.example/preview.jpg');
+  assert.equal(element('asset-link').href, 'https://cdn.example/preview.jpg');
 });
