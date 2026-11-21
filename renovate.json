@@ -2,5 +2,25 @@
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
   "extends": [
     "config:recommended"
+  ],
+  "enabledManagers": [
+    "swift"
+  ],
+  "includePaths": [
+    "macos-upload-client/UploaderCore/Package.swift"
+  ],
+  "minimumReleaseAge": "14 days",
+  "minimumReleaseAgeBehaviour": "timestamp-required",
+  "internalChecksFilter": "strict",
+  "automerge": false,
+  "prConcurrentLimit": 1,
+  "packageRules": [
+    {
+      "description": "Limit automatic update proposals to existing major versions",
+      "matchUpdateTypes": [
+        "major"
+      ],
+      "enabled": false
+    }
   ]
 }
