@@ -8,7 +8,7 @@ let package = Package(
         .library(name: "UploaderCore", targets: ["UploaderCore"])
     ],
     dependencies: [
-        .package(url: "https://github.com/groue/GRDB.swift.git", from: "7.0.0")
+        .package(url: "https://github.com/groue/GRDB.swift.git", from: "7.12.0")
     ],
     targets: [
         .target(
