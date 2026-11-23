@@ -1,0 +1,32 @@
+name: Uploader core tests
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - macos-upload-client/UploaderCore/**
+      - renovate.json
+      - .github/workflows/uploader-core.yml
+  push:
+    branches: [main]
+    paths:
+      - macos-upload-client/UploaderCore/**
+      - renovate.json
+      - .github/workflows/uploader-core.yml
+permissions:
+  contents: read
+concurrency:
+  group: uploader-core-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  uploader-core:
+    runs-on: macos-15
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Show Swift toolchain
+        run: swift --version
+      - name: Build and test uploader core
+        working-directory: macos-upload-client/UploaderCore
+        run: swift test --force-resolved-versions
