@@ -61,6 +61,9 @@ The project is split into an engine-independent core and the app:
   cd UploaderCore && swift test
   ```
 
+  CI builds and tests this package on macOS 15 for core and dependency-maintenance
+  changes, using the versions committed in `Package.resolved`.
+
 - `GumnutUploader/` — the sandboxed macOS app. Open it in Xcode:
 
   ```sh
